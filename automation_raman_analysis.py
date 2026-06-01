@@ -10,13 +10,123 @@ from util import run_command, _fmt_time, _calc_duration, _ensure_dim_in_conf, _r
 from util import write_status as _util_write_status, _STEP_HISTORY, _STEP_DESCRIPTIONS
 import shutil
 
+# ── NBANDS auto-scaling ───────────────────────────────────────────────────────
+# Hardcoded NBANDS=64 in input/INCAR fails for large supercells (e.g., 5x5x1
+# has NELECT=200, requiring at least 100 bands). This function dynamically
+# calculates NBANDS from the primitive cell, POTCAR ZVAL, and phonopy.dim.
+def _calculate_nbands(poscar_path, potcar_path, phonopy_dim, buffer_factor=1.3):
+    """
+    Calculate appropriate NBANDS for a supercell VASP calculation.
+
+    Reads the primitive POSCAR to get atom counts per species, reads POTCAR to
+    get ZVAL (valence electrons), then scales by supercell dimensions from
+    phonopy.dim. Adds a buffer_factor (>1.0) to provide empty bands.
+
+    Returns:
+        int: Recommended NBANDS value, or None if parsing fails.
+    """
+    # ── Parse POSCAR for atom counts per species ──────────────────────────
+    # VASP POSCAR format (without selective dynamics):
+    #   line 1: comment
+    #   line 2: scale factor
+    #   lines 3-5: lattice vectors
+    #   line 6: species names (optional)
+    #   line 7: atom counts
+    # With selective dynamics, an extra line appears after each lattice vector
+    # and after the atom-counts line. We handle both cases by finding the first
+    # line after the lattice vectors that contains only digits/whitespace.
+    try:
+        with open(poscar_path) as _f:
+            _lines = _f.readlines()
+    except (IOError, OSError) as _e:
+        print(f"  [nbands] WARNING: Cannot read POSCAR '{poscar_path}': {_e}")
+        return None
+
+    # Find atom-counts line: first line after the 3 lattice vectors (lines 2-4,
+    # 0-indexed) that contains only digits and whitespace.
+    _atom_counts_line = None
+    for _i in range(5, len(_lines)):
+        _stripped = _lines[_i].strip()
+        if _stripped and all(_c.isdigit() or _c.isspace() for _c in _stripped):
+            _atom_counts_line = _stripped
+            break
+
+    if _atom_counts_line is None:
+        print(f"  [nbands] WARNING: Could not find atom-counts line in POSCAR: {poscar_path}")
+        return None
+
+    _atom_counts = [int(x) for x in _atom_counts_line.split()]
+    _total_atoms_primitive = sum(_atom_counts)
+
+    # ── Parse POTCAR for ZVAL per species ─────────────────────────────────
+    # POTCAR contains lines like:
+    #   POMASS =   10.811; ZVAL   =    3.000    mass and valenz
+    _zvals = []
+    try:
+        with open(potcar_path) as _f:
+            for _line in _f:
+                if 'ZVAL' in _line:
+                    _match = re.search(r'ZVAL\s*=\s*([\d.]+)', _line)
+                    if _match:
+                        _zvals.append(float(_match.group(1)))
+    except (IOError, OSError) as _e:
+        print(f"  [nbands] WARNING: Cannot read POTCAR '{potcar_path}': {_e}")
+        return None
+
+    if len(_zvals) != len(_atom_counts):
+        print(f"  [nbands] WARNING: Got {len(_zvals)} ZVAL values but {len(_atom_counts)} "
+              f"species — cannot calculate NBANDS.")
+        return None
+
+    # ── Calculate NELECT in primitive cell ─────────────────────────────────
+    _nelect_primitive = sum(_c * _z for _c, _z in zip(_atom_counts, _zvals))
+
+    # ── Parse phonopy.dim ──────────────────────────────────────────────────
+    _dim_parts = phonopy_dim.split()
+    if len(_dim_parts) < 3:
+        print(f"  [nbands] WARNING: phonopy dim '{phonopy_dim}' has < 3 components")
+        return None
+    try:
+        _dim_mult = [int(x) for x in _dim_parts[:3]]
+    except ValueError:
+        print(f"  [nbands] WARNING: Could not parse phonopy dim components: '{phonopy_dim}'")
+        return None
+    _supercell_factor = _dim_mult[0] * _dim_mult[1] * _dim_mult[2]
+
+    # ── Calculate NELECT in supercell ──────────────────────────────────────
+    _nelect_supercell = _nelect_primitive * _supercell_factor
+
+    # Each band holds 2 electrons (non-spin-polarized).  Add buffer for
+    # empty bands (improves convergence and avoids "highest band occupied"
+    # warnings).
+    _min_nbands = int(_nelect_supercell / 2)
+    _nbands = int(_min_nbands * buffer_factor)
+    if _nbands <= _min_nbands:
+        _nbands = _min_nbands + 1
+
+    # Round up to nearest 16 (convenient divisor for parallelization)
+    _nbands = ((_nbands + 15) // 16) * 16
+
+    print(f"  [nbands] Primitive cell: {_total_atoms_primitive} atoms, "
+          f"{_nelect_primitive:.0f} electrons")
+    print(f"  [nbands] Phonopy dim: {phonopy_dim}  →  supercell factor = {_supercell_factor}")
+    print(f"  [nbands] Supercell: ~{_total_atoms_primitive * _supercell_factor} atoms, "
+          f"{_nelect_supercell:.0f} electrons → NBANDS = {_nbands} "
+          f"(min required: {_min_nbands}, buffer: {buffer_factor})")
+
+    return _nbands
+
+
 # ── Command-line argument parsing ─────────────────────────────────────────────
 # --restart : Delete all generated files and start the pipeline from scratch.
 #             Keeps input/ and workflow_settings.yaml intact.
+# --cpu     : Use CPU VASP binary and srun arguments instead of GPU defaults.
 _RESTART_FLAG = "--restart" in sys.argv
+_CPU_FLAG = "--cpu" in sys.argv
 if _RESTART_FLAG:
-    # Remove the flag so the rest of the script doesn't see it
     sys.argv = [a for a in sys.argv if a != "--restart"]
+if _CPU_FLAG:
+    sys.argv = [a for a in sys.argv if a != "--cpu"]
 
 # --- Configuration ---
 # All paths are configurable via environment variables set in ~/.bashrc.
@@ -120,9 +230,16 @@ _DEFAULT_BINARY_UTILITIES_DIR = "/global/cfs/cdirs/m526/vasp_binaries/binary_uti
 BINARY_UTILITIES_DIR = os.environ.get("BINARY_UTILITIES_DIR", _DEFAULT_BINARY_UTILITIES_DIR)
 
 # Absolute path to the VASP binary (as confirmed by you)
-# Set the VASP_BINARY environment variable to override the default.
-_DEFAULT_VASP_BINARY = "/global/cfs/cdirs/m526/liangbo/bin/gpu/vasp_std"
-VASP_BINARY_PATH = os.environ.get("VASP_BINARY", _DEFAULT_VASP_BINARY)
+# Two separate env vars:
+#   VASP_BINARY     — GPU binary (default)
+#   VASP_BINARY_CPU — CPU binary (used with --cpu flag)
+# Use --cpu flag to switch to the CPU-compiled binary.
+_DEFAULT_VASP_BINARY_GPU = "/global/cfs/cdirs/m526/liangbo/bin/gpu/vasp_std"
+_DEFAULT_VASP_BINARY_CPU = "/global/cfs/cdirs/m526/liangbo/bin/cpu/vasp_std"
+if _CPU_FLAG:
+    VASP_BINARY_PATH = os.environ.get("VASP_BINARY_CPU", _DEFAULT_VASP_BINARY_CPU)
+else:
+    VASP_BINARY_PATH = os.environ.get("VASP_BINARY", _DEFAULT_VASP_BINARY_GPU)
 
 # [DEEPSEEK 2026-05-27] Validate VASP binary and utilities directory exist
 if not os.path.isfile(VASP_BINARY_PATH):
@@ -131,6 +248,8 @@ if not os.path.isfile(VASP_BINARY_PATH):
     print(f"Expected location: {VASP_BINARY_PATH}")
     sys.exit(1)
 print(f"VASP binary found: {VASP_BINARY_PATH}")
+if _CPU_FLAG:
+    print(f"  (CPU mode: --cpu flag set)")
 
 if not os.path.isdir(BINARY_UTILITIES_DIR):
     print(f"Error: BINARY_UTILITIES_DIR '{BINARY_UTILITIES_DIR}' does not exist.")
@@ -165,6 +284,12 @@ CONFIG = {
         "ntasks": 4,
         "cpus_per_task": 32,
         "constraint": "gpu"
+    },
+    "vasp_srun_cpu": {
+        "gpus": 0,
+        "ntasks": 32,
+        "cpus_per_task": 4,
+        "constraint": "cpu"
     },
     "vasp_loop": {
         "max_restarts": 3
@@ -232,12 +357,26 @@ if not os.path.isdir(MATERIAL_DIR):
     print(f"Error: MATERIAL_DIR '{MATERIAL_DIR}' does not exist (from config name '{MATERIAL_NAME}').")
     sys.exit(1)
 
-# Build srun argument string from config
-_SRUN_GPUS = CONFIG["vasp_srun"]["gpus"]
-_SRUN_NTASKS = CONFIG["vasp_srun"]["ntasks"]
-_SRUN_CPUS = CONFIG["vasp_srun"]["cpus_per_task"]
-_SRUN_CONSTRAINT = CONFIG["vasp_srun"]["constraint"]
-SRUN_ARGS = f"--cpu_bind=cores --gpus {_SRUN_GPUS} --ntasks {_SRUN_NTASKS} --cpus-per-task {_SRUN_CPUS} -C {_SRUN_CONSTRAINT}"
+# Build srun argument string from config.
+# In CPU mode (--cpu), use vasp_srun_cpu settings; otherwise use vasp_srun (GPU).
+if _CPU_FLAG:
+    _SRUN_GPUS = CONFIG["vasp_srun_cpu"]["gpus"]
+    _SRUN_NTASKS = CONFIG["vasp_srun_cpu"]["ntasks"]
+    _SRUN_CPUS = CONFIG["vasp_srun_cpu"]["cpus_per_task"]
+    _SRUN_CONSTRAINT = CONFIG["vasp_srun_cpu"]["constraint"]
+    SRUN_ARGS = (f"--cpu_bind=cores --ntasks {_SRUN_NTASKS} "
+                 f"--cpus-per-task {_SRUN_CPUS}")
+    print(f"  [cpu] CPU srun args: {SRUN_ARGS}  "
+          f"(from config vasp_srun_cpu: ntasks={_SRUN_NTASKS}, "
+          f"cpus={_SRUN_CPUS}, constraint={_SRUN_CONSTRAINT})")
+else:
+    _SRUN_GPUS = CONFIG["vasp_srun"]["gpus"]
+    _SRUN_NTASKS = CONFIG["vasp_srun"]["ntasks"]
+    _SRUN_CPUS = CONFIG["vasp_srun"]["cpus_per_task"]
+    _SRUN_CONSTRAINT = CONFIG["vasp_srun"]["constraint"]
+    SRUN_ARGS = (f"--cpu_bind=cores --gpus {_SRUN_GPUS} "
+                 f"--ntasks {_SRUN_NTASKS} --cpus-per-task {_SRUN_CPUS} "
+                 f"-C {_SRUN_CONSTRAINT}")
 
 # Phonopy settings from config
 PHONOPY_DIM = CONFIG["phonopy"]["dim"]
@@ -289,14 +428,82 @@ def write_status(step, status, message=""):
     )
 
 
+def _is_vasprun_valid(filepath):
+    """
+    Check that a vasprun.xml file exists, is non-trivial, and was produced by a
+    *successful* VASP run.
+
+    VASP crash stubs (e.g., NBANDS insufficiency) can produce vasprun.xml files
+    larger than 1000 bytes but truncated — missing the closing ``</modeling>`` tag.
+    This function reads the last 4 KB of the file to verify the closing tag exists.
+
+    Returns:
+        True if the file exists, has size > 1000 bytes, and contains ``</modeling>``.
+    """
+    try:
+        if not os.path.exists(filepath):
+            return False
+        size = os.path.getsize(filepath)
+        if size <= 1000:
+            return False
+        # Read the last 4096 bytes where the closing tag should be
+        with open(filepath, "rb") as _f:
+            if size > 4096:
+                _f.seek(-4096, 2)
+            _tail = _f.read()
+        return b"</modeling>" in _tail
+    except (IOError, OSError):
+        return False
+
+
 def vasp_loop_check_and_restart(vasp_script_path, max_restarts=3):
     """
-    Runs a VASP orchestration script and performs a basic check for success.
+    Runs VASP in all hf_POSCAR-* directories and validates that ALL
+    displacement runs produced a genuinely successful vasprun.xml
+    (detecting crashes like NBANDS insufficiency via ``</modeling>`` tag).
+
+    In CPU mode (--cpu), runs VASP directly with CPU binary and srun args,
+    bypassing the GPU-hardcoded automate_hfiles.sh entirely.
+
     Retries up to max_restarts times if initial check fails.
     """
     for i in range(max_restarts):
         print(f"\n--- Running VASP iteration {i+1}/{max_restarts} ---")
-        run_command(vasp_script_path, cwd=HFFILES_DIR)
+
+        # Discover hf_POSCAR-* directories
+        _all_hf = sorted([
+            d for d in os.listdir(HFFILES_DIR)
+            if d.startswith("hf_POSCAR-") and os.path.isdir(os.path.join(HFFILES_DIR, d))
+        ])
+
+        if not _all_hf:
+            # No dirs yet — run the orchestration script to create them
+            print("  No hf_POSCAR-* dirs found. Running orchestration script to create them...")
+            run_command(vasp_script_path, cwd=HFFILES_DIR)
+            # Re-discover after script ran
+            _all_hf = sorted([
+                d for d in os.listdir(HFFILES_DIR)
+                if d.startswith("hf_POSCAR-") and os.path.isdir(os.path.join(HFFILES_DIR, d))
+            ])
+            if not _all_hf:
+                print("  ERROR: orchestration script created no hf_POSCAR-* directories.")
+                return False
+
+        if _CPU_FLAG:
+            print(f"  [cpu] Running VASP in {len(_all_hf)} directories (CPU mode)...")
+            print(f"  [cpu] VASP binary: {VASP_BINARY_PATH}")
+            print(f"  [cpu] srun args: {SRUN_ARGS}")
+            for _dir in _all_hf:
+                _d_path = os.path.join(HFFILES_DIR, _dir)
+                print(f"    Running VASP in {_dir}...")
+                run_command(
+                    f"srun {SRUN_ARGS} {VASP_BINARY_PATH} > stdout",
+                    cwd=_d_path,
+                )
+        else:
+            # GPU mode: use the existing orchestration script
+            print(f"  [gpu] Running automate_hfiles.sh (GPU mode)...")
+            run_command(vasp_script_path, cwd=HFFILES_DIR)
 
         # Check ALL hf_POSCAR-* directories have a valid vasprun.xml.
         # Checking only the first directory is insufficient: if any displacement VASP run
@@ -312,8 +519,7 @@ def vasp_loop_check_and_restart(vasp_script_path, max_restarts=3):
 
         failed_dirs = [
             d for d in hf_dirs
-            if not (os.path.exists(os.path.join(HFFILES_DIR, d, "vasprun.xml"))
-                    and os.path.getsize(os.path.join(HFFILES_DIR, d, "vasprun.xml")) > 1000)
+            if not _is_vasprun_valid(os.path.join(HFFILES_DIR, d, "vasprun.xml"))
         ]
 
         if not failed_dirs:
@@ -485,6 +691,29 @@ if START_STEP <= 4:
         _hk.write(f"{HF_KPOINTS_SHIFT}\n")
     print(f"  [setup] Wrote coarse KPOINTS ({HF_KPOINTS_MESH}) to hf/")
     run_command(f"cp input/POTCAR {HFFILES_DIR}/", cwd=MATERIAL_DIR)
+
+    # [DEEPSEEK 2026-06-01] Auto-scale NBANDS for force-constants supercell.
+    # The INCAR copied from root has NBANDS=64 (hardcoded for primitive cell).
+    # Large supercells (5x5x1, 6x6x1) have many more electrons and need more bands.
+    _nbands_hf = _calculate_nbands(
+        os.path.join(HFFILES_DIR, "POSCAR_unitcell"),
+        os.path.join(HFFILES_DIR, "POTCAR"),
+        PHONOPY_DIM,
+    )
+    if _nbands_hf is not None:
+        _hf_incar = os.path.join(HFFILES_DIR, "INCAR")
+        with open(_hf_incar) as _f:
+            _incar_content = _f.read()
+        _incar_content = re.sub(
+            r'^\s*NBANDS\s*=\s*\d+',
+            f'NBANDS = {_nbands_hf}',
+            _incar_content,
+            flags=re.MULTILINE,
+        )
+        with open(_hf_incar, "w") as _f:
+            _f.write(_incar_content)
+        print(f"  [nbands] Updated NBANDS = {_nbands_hf} in hf/INCAR")
+
     # symmetry.conf is optional (needed for irrep analysis in Step 8b).
     # Use check_success=False so new materials without it don't crash here.
     if os.path.exists(os.path.join(MATERIAL_DIR, "input", "symmetry.conf")):
@@ -596,8 +825,13 @@ if START_STEP <= 8:
     run_command("phonopy -c CONTCAR eigenvectors.conf", cwd=HFFILES_DIR)
 
     # ── phonopy_visualization (reads band.yaml, writes all_mode.txt) ───────
-    run_command(f"export PATH={BINARY_UTILITIES_DIR}:$PATH && echo -e '1\\nno' | phonopy_visualization",
-                cwd=HFFILES_DIR)
+    # NOTE: This Fortran binary links against CUDA (libcuda.so.1, libcudart.so.12).
+    # On CPU nodes (--cpu), CUDA libraries are not available — skip gracefully.
+    _pv_cmd = f"export PATH={BINARY_UTILITIES_DIR}:$PATH && echo -e '1\\nno' | phonopy_visualization"
+    if _CPU_FLAG:
+        run_command(_pv_cmd, cwd=HFFILES_DIR, check_success=False)
+    else:
+        run_command(_pv_cmd, cwd=HFFILES_DIR)
 
     # ── symmetry.conf (irreducible representations at Gamma) ────────────────
     # The original file only contains IRREPS = 0 0 0 but lacks DIM.
@@ -605,7 +839,14 @@ if START_STEP <= 8:
     sym_conf = os.path.join(HFFILES_DIR, "symmetry.conf")
     if _ensure_dim_in_conf(sym_conf, "symmetry.conf", PHONOPY_DIM):
         run_command("phonopy -c CONTCAR symmetry.conf", cwd=HFFILES_DIR)
-        run_command(f"{BINARY_UTILITIES_DIR}/phonopy_symmetry", cwd=HFFILES_DIR)
+        # phonopy_symmetry reads all_mode.txt (produced by phonopy_visualization above).
+        # In CPU mode, phonopy_visualization is skipped (CUDA dependency), so
+        # all_mode.txt doesn't exist — skip phonopy_symmetry gracefully too.
+        _all_mode_path = os.path.join(HFFILES_DIR, "all_mode.txt")
+        if _CPU_FLAG and not os.path.exists(_all_mode_path):
+            print("  [cpu] phonopy_symmetry skipped (all_mode.txt not available on CPU node)")
+        else:
+            run_command(f"{BINARY_UTILITIES_DIR}/phonopy_symmetry", cwd=HFFILES_DIR)
     else:
         print("  [8b] symmetry.conf not found — skipping symmetry analysis")
 
@@ -638,6 +879,28 @@ if START_STEP <= 10:
     run_command(f"cp input/KPOINTS {RAMAN_DIR}/", cwd=MATERIAL_DIR)
     run_command(f"cp input/POTCAR {RAMAN_DIR}/", cwd=MATERIAL_DIR)
     print("  [setup] Copied INCAR (from root), KPOINTS + POTCAR (from input/) to RAMAN_DIR.")
+
+    # [DEEPSEEK 2026-06-01] Auto-scale NBANDS for resonant Raman supercell.
+    # The INCAR from root has NBANDS=64 (hardcoded).  Resonant Raman runs VASP on
+    # the same supercell as the force-constants step, so the same NBANDS applies.
+    _nbands_raman = _calculate_nbands(
+        os.path.join(RAMAN_DIR, "CONTCAR"),
+        os.path.join(RAMAN_DIR, "POTCAR"),
+        PHONOPY_DIM,
+    )
+    if _nbands_raman is not None:
+        _raman_incar = os.path.join(RAMAN_DIR, "INCAR")
+        with open(_raman_incar) as _f:
+            _incar_content = _f.read()
+        _incar_content = re.sub(
+            r'^\s*NBANDS\s*=\s*\d+',
+            f'NBANDS = {_nbands_raman}',
+            _incar_content,
+            flags=re.MULTILINE,
+        )
+        with open(_raman_incar, "w") as _f:
+            _f.write(_incar_content)
+        print(f"  [nbands] Updated NBANDS = {_nbands_raman} in raman/INCAR")
 
     # [DEEPSEEK 2026-05-28] Append LOPTICS settings to RAMAN_DIR/INCAR if enabled.
     # Resonant Raman needs LOPTICS=.TRUE. (dielectric function) and sufficient NBANDS.
@@ -699,19 +962,29 @@ if START_STEP <= 12:
 
     # 12. Run "ramdiscar", "genRApos610", and "runRA"
     print("\n--- Step 12: Generate Raman displacements and organize ---")
+
+    # Helper: run a CUDA-linked binary in CPU mode without crashing
+    def _run_cpu_resilient(cmd, cwd=None, label="binary"):
+        if _CPU_FLAG:
+            run_command(cmd, cwd=cwd, check_success=False)
+        else:
+            run_command(cmd, cwd=cwd)
+
     # ramdiscar: (No explicit input required according to your list)
-    run_command(f"{BINARY_UTILITIES_DIR}/ramdiscar")
+    # NOTE: ramdiscar links CUDA (libcudart.so.12) — may fail on CPU nodes.
+    _run_cpu_resilient(f"{BINARY_UTILITIES_DIR}/ramdiscar", label="ramdiscar")
 
     # genRApos610: (Requires input 'go')
     # Use absolute path in redirect so the binary runs in RAMAN_DIR (current dir after
     # os.chdir in Step 11), placing ra_pos_* directories where Step 13 expects them.
+    # NOTE: genRApos610 links CUDA (libcudart.so.12) — may fail on CPU nodes.
     _go_file = os.path.join(RAMAN_DIR, ".go_input")
     with open(_go_file, "w") as _gf:
         _gf.write("go\n")
-    run_command(f"{BINARY_UTILITIES_DIR}/genRApos610 < {_go_file}")
+    _run_cpu_resilient(f"{BINARY_UTILITIES_DIR}/genRApos610 < {_go_file}", label="genRApos610")
     os.remove(_go_file)
 
-    # runRA: (No explicit input required according to your list)
+    # runRA: (No explicit input required according to your list, NO CUDA deps)
     run_command(f"{BINARY_UTILITIES_DIR}/runRA")
     write_status(12, "completed", "Raman displacements generated and organized")
 
@@ -761,7 +1034,6 @@ if START_STEP <= 14:
                 _kf.write(f'cp "{_dir_name}/vasprun.xml" "AXML/{_xml_name}.xml"\n')
         # Make executable and run
         run_command(f"chmod +x kopia && ./kopia", cwd=RAMAN_DIR)
-        print(f"  Generated kopia script with {len(_ra_dirs)} displacement directories")
         write_status(14, "completed", "Kopia post-processing done")
 
 # ── Step 15: RAMFILE generation ──────────────────────────────────────────────
@@ -900,10 +1172,17 @@ if START_STEP <= 18:
             _rf.write(_raman_input)
         # Suppress stdout only (to hide the interactive-prompt echoes), but keep
         # stderr visible so genuine error messages from the binary reach the log.
-        run_command(
-            f"{BINARY_UTILITIES_DIR}/raman_tensor < .raman_tensor_input > /dev/null",
-            cwd=RAMAN_DIR
-        )
+        # NOTE: raman_tensor links CUDA (libcudart.so.12) — may fail on CPU nodes.
+        if _CPU_FLAG:
+            run_command(
+                f"{BINARY_UTILITIES_DIR}/raman_tensor < .raman_tensor_input > /dev/null",
+                cwd=RAMAN_DIR, check_success=False
+            )
+        else:
+            run_command(
+                f"{BINARY_UTILITIES_DIR}/raman_tensor < .raman_tensor_input > /dev/null",
+                cwd=RAMAN_DIR
+            )
         os.remove(_rt_file)
         # [DEEPSEEK 2026-05-27] Per-energy result printed (status written once after loop)
         print(f"    [energy {energy}eV] Raman tensor computed with pol=({RAMAN_INCIDENT_POL},{RAMAN_SCATTERED_POL})")
