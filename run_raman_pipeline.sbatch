@@ -27,11 +27,14 @@
 MATERIAL_NAME="hBN"
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ── Parse --restart flag ────────────────────────────────────────────────────
+# ── Parse flags ─────────────────────────────────────────────────────────────
 RESTART_FLAG=""
+SCRATCH_FLAG=""
 for arg in "$@"; do
     if [ "$arg" = "--restart" ]; then
         RESTART_FLAG="--restart"
+    elif [ "$arg" = "--scratch" ]; then
+        SCRATCH_FLAG="--scratch"
     fi
 done
 # ─────────────────────────────────────────────────────────────────────────────
@@ -144,8 +147,8 @@ echo "Working directory: $(pwd)"
 # via write_status() calls at each step. This wrapper only writes the
 # initial header (above) and final cleanup (trap).
 
-echo "Running: python $(dirname "$0")/automation_raman_analysis.py $RESTART_FLAG"
-python "$(dirname "$0")/automation_raman_analysis.py" $RESTART_FLAG
+echo "Running: python $(dirname "$0")/automation_raman_analysis.py $RESTART_FLAG $SCRATCH_FLAG"
+python "$(dirname "$0")/automation_raman_analysis.py" $RESTART_FLAG $SCRATCH_FLAG
 
 echo "============================================"
 echo " Pipeline completed successfully."

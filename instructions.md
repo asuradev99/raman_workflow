@@ -48,7 +48,7 @@ The prompt will change — you're now inside `tmux`.
 
 ### 3. Allocate a compute node
 
-#### GPU mode (default — for hBN_LDA, hBN_PBE, hBN_PBEsol, etc.)
+#### GPU mode (default — for hBN_LDA, hBN_PBE, hBN_PBEsol_4x4x1, etc.)
 
 ```bash
 salloc -N 1 -C gpu --gpus-per-node=4 -t 04:00:00 --qos=interactive -A m526
@@ -80,7 +80,19 @@ With restart (deletes all generated files, keeps `input/` and `workflow_settings
 bash raman_workflow/run_raman_pipeline_interactive.sh hBN_LDA --restart
 ```
 
-Other material names: `hBN_PBE`, `hBN_PBEsol`, `hBN_PS`, `hBN_PBE_X`, `hBN_PBE_C`, `hBN_RE`, `hBN_RP`, `hBN_PBEsol_3x3x1`, `hBN_PBEsol_5x5x1`, `hBN_PBEsol_6x6x1`.
+Using scratch (runs VASP on `$SCRATCH` for fast I/O, results copied back to HOME):
+
+```bash
+bash raman_workflow/run_raman_pipeline_interactive.sh hBN_PBEsol_6x6x1 --scratch
+```
+
+With both scratch and restart:
+
+```bash
+bash raman_workflow/run_raman_pipeline_interactive.sh hBN_PBEsol_6x6x1 --scratch --restart
+```
+
+Other material names: `hBN_PBE`, `hBN_PBEsol_4x4x1`, `hBN_PS`, `hBN_PBE_X`, `hBN_PBE_C`, `hBN_RE`, `hBN_RP`, `hBN_PBEsol_3x3x1`, `hBN_PBEsol_5x5x1`, `hBN_PBEsol_6x6x1`.
 
 #### CPU material:
 
@@ -92,6 +104,18 @@ With restart:
 
 ```bash
 bash raman_workflow/run_raman_pipeline_interactive.sh hBN_PBEsol_CPU --cpu --restart
+```
+
+#### Combining flags:
+
+Flags can be combined freely. Examples:
+
+```bash
+# GPU + scratch + restart
+bash raman_workflow/run_raman_pipeline_interactive.sh hBN_PBEsol_6x6x1 --scratch --restart
+
+# CPU + scratch
+bash raman_workflow/run_raman_pipeline_interactive.sh hBN_PBEsol_CPU --cpu --scratch
 ```
 
 ### 5. Detach from tmux
@@ -158,6 +182,54 @@ The CPU material directory [`hBN_PBEsol_CPU/workflow_settings.yaml`](vasp_calcul
 
 ---
 
+---
+
+## `--scratch` flag details
+
+The `--scratch` flag redirects VASP output to `$SCRATCH` (NERSC's fast scratch filesystem) instead of `$HOME`. This is beneficial for large supercells (5×5×1, 6×6×1) where VASP writes large output files (WAVECAR, CHGCAR) that would consume `$HOME` quota.
+
+### How it works
+
+| Aspect | Default (HOME) | `--scratch` |
+|--------|---------------|-------------|
+| Config source (`input/`, `workflow_settings.yaml`) | `$HOME/vasp_calculations/<material>/` | Same — stays on HOME |
+| VASP output (`scf/`, `hf/`, `raman/`) | `$HOME/vasp_calculations/<material>/` | `$SCRATCH/vasp_work/<material>/` |
+| `workflow_status.txt` | `$HOME/vasp_calculations/<material>/` | Same — always on HOME |
+| Final `output/` | `$HOME/vasp_calculations/<material>/output/` | Copied from SCRATCH → HOME on completion |
+| Sync at start | N/A | `input/` + `workflow_settings.yaml` copied from HOME → SCRATCH |
+| Cleanup on `--restart` | Removes `scf/`, `hf/`, `raman/`, `output/` from HOME | Removes from SCRATCH + also cleans `output/` on HOME |
+
+### When to use
+
+- **Large supercells** (5×5×1, 6×6×1) that write large WAVECAR/CHGCAR files
+- Materials approaching `$HOME` quota limits
+- Jobs where fast I/O is beneficial (`$SCRATCH` is typically faster than `$HOME`)
+
+### When NOT to use
+
+- Small supercells (3×3×1 or smaller) — the sync overhead isn't worth it
+- Quick test runs where you want results instantly visible in HOME
+- Materials where you don't need `$HOME` quota relief
+
+### Crash recovery
+
+- `workflow_status.txt` stays on HOME — always visible for `--resume` even if SCRATCH is purged
+- VASP output stays on SCRATCH — same as without the flag
+- If `$SCRATCH` is purged (90-day retention on NERSC), the sync re-creates `input/` at pipeline start. Use `--restart` to re-run VASP steps.
+- `$SCRATCH` is a shared Lustre filesystem at NERSC — visible from all login/compute nodes.
+
+### Example with large supercell
+
+```bash
+# 1. Allocate (no special allocation needed — scratch is transparent)
+salloc -N 1 -C gpu --gpus-per-node=4 -t 04:00:00 --qos=interactive -A m526
+
+# 2. Run with scratch flag
+bash raman_workflow/run_raman_pipeline_interactive.sh hBN_PBEsol_6x6x1 --scratch
+```
+
+---
+
 ## Batch processing (run_gga_batch.sh)
 
 To process multiple materials sequentially without manual intervention:
@@ -166,13 +238,18 @@ To process multiple materials sequentially without manual intervention:
 # Edit the MATERIALS array in the script first:
 #   raman_workflow/run_gga_batch.sh (line ~59)
 
-# GPU materials:
-bash raman_workflow/run_gga_batch.sh              # resume
-bash raman_workflow/run_gga_batch.sh --restart     # fresh start
+# GPU materials (default):
+bash raman_workflow/run_gga_batch.sh                 # resume
+bash raman_workflow/run_gga_batch.sh --restart        # fresh start
+
+# GPU materials with scratch (large supercells):
+bash raman_workflow/run_gga_batch.sh --scratch        # resume on scratch
+bash raman_workflow/run_gga_batch.sh --scratch --restart  # fresh start on scratch
 
 # CPU materials:
-bash raman_workflow/run_gga_batch.sh --cpu         # resume
-bash raman_workflow/run_gga_batch.sh --cpu --restart  # fresh start
+bash raman_workflow/run_gga_batch.sh --cpu            # resume
+bash raman_workflow/run_gga_batch.sh --cpu --restart  # fresh start on CPU
+bash raman_workflow/run_gga_batch.sh --cpu --scratch  # CPU + scratch
 ```
 
 ---
@@ -219,17 +296,16 @@ bash raman_workflow/run_raman_pipeline_interactive.sh hBN_LDA --restart
 
 What `--restart` removes:
 
-| Item | Pipeline Step |
-|------|--------------|
-| `scf/` | Step 3 VASP output |
-| `hf/` | Steps 4–9 phonopy displacements + force constants |
-| `raman/` | Steps 10–18 Raman displacements + spectra |
-| `output/` | Aggregated results (plots, summaries) |
-| `workflow_status.txt` | Resume checkpoint |
-| Root-level files (INCAR, CONTCAR, POSCAR-*, etc.) | Step 3 intermediate files |
+| Item | Pipeline Step | Default (HOME) | With `--scratch` |
+|------|--------------|----------------|-------------------|
+| `scf/` | ALL Step 3 output + intermediates | `$MATERIAL_DIR/scf/` | `$SCRATCH/vasp_work/<material>/scf/` |
+| `hf/` | Steps 4–10 supercell relax + phonopy + force constants | `$MATERIAL_DIR/hf/` | `$SCRATCH/vasp_work/<material>/hf/` |
+| `raman/` | Steps 11–20 Raman displacements + spectra | `$MATERIAL_DIR/raman/` | `$SCRATCH/vasp_work/<material>/raman/` |
+| `output/` | Aggregated results (plots, summaries) | `$MATERIAL_DIR/output/` | `$SCRATCH/vasp_work/<material>/output/` + also cleans `output/` on HOME |
+| `workflow_status.txt` | Resume checkpoint | `$MATERIAL_DIR/workflow_status.txt` | Same — always on HOME |
 
 What `--restart` **preserves**:
-- `input/` directory (POSCAR, INCARs, POTCAR, KPOINTS, symmetry.conf)
+- `input/` directory (POSCAR, INCARs, POTCAR, KPOINTS) — `symmetry.conf` is auto-generated by the pipeline
 - `workflow_settings.yaml`
 - All environment variable and config settings
 
@@ -282,7 +358,7 @@ Where `N_valence_electrons` is read from POSCAR atom counts × POTCAR ZVALs (B=3
 |-----------|-----------|--------|
 | `hBN_LDA` | LDA | ✅ Completed |
 | `hBN_PBE` | PBE | ✅ Completed |
-| `hBN_PBEsol` | PBEsol | ✅ Completed |
+| `hBN_PBEsol_4x4x1` | PBEsol | ✅ Completed |
 | `hBN_PS` | PBEsol (PS) | ✅ Completed |
 | `hBN_PBE_X` | PBE_X | ✅ Completed |
 | `hBN_PBE_C` | PBE_C | ✅ Completed |

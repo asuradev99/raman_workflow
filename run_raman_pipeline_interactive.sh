@@ -49,6 +49,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEFAULT_MATERIAL="hBN"
 RESTART_FLAG=""
 CPU_FLAG=""
+SCRATCH_FLAG=""
 MATERIAL_NAME=""
 
 for arg in "$@"; do
@@ -56,13 +57,17 @@ for arg in "$@"; do
         RESTART_FLAG="--restart"
     elif [ "$arg" = "--cpu" ]; then
         CPU_FLAG="--cpu"
+    elif [ "$arg" = "--scratch" ]; then
+        SCRATCH_FLAG="--scratch"
     elif [ "$arg" = "-h" ] || [ "$arg" = "--help" ]; then
-        echo "Usage: bash run_raman_pipeline_interactive.sh [material_name] [--cpu] [--restart]"
+        echo "Usage: bash run_raman_pipeline_interactive.sh [material_name] [--cpu] [--restart] [--scratch]"
         echo ""
         echo "  material_name   Subdirectory inside \$RAMAN_PROJECT_DIR (default: hBN)"
         echo "  --cpu           Use CPU VASP binary and CPU node srun arguments."
         echo "                  Requires: salloc -N 1 -C cpu (not -C gpu)"
         echo "  --restart       Delete all generated files and restart from scratch"
+        echo "  --scratch       Run VASP on \$SCRATCH (fast I/O), keep config on \$HOME."
+        echo "                  Results copied back to HOME on completion."
         echo ""
         echo "  Prerequisites:"
         echo "    1. Run inside an active salloc session on a compute node"
@@ -70,18 +75,27 @@ for arg in "$@"; do
         echo "       must be set in ~/.bashrc"
         echo ""
         echo "  Examples:"
-        echo "    # GPU material:"
+        echo "    # GPU material (default):"
         echo "    salloc -N 1 -C gpu --gpus-per-node=4 -t 04:00:00 \\"
         echo "           --qos=interactive -A m526"
         echo "    bash raman_workflow/run_raman_pipeline_interactive.sh hBN_LDA"
+        echo ""
+        echo "    # GPU material with scratch (for large supercells):"
+        echo "    salloc -N 1 -C gpu --gpus-per-node=4 -t 04:00:00 \\"
+        echo "           --qos=interactive -A m526"
+        echo "    bash raman_workflow/run_raman_pipeline_interactive.sh \\"
+        echo "      hBN_PBEsol_6x6x1 --scratch"
         echo ""
         echo "    # CPU material:"
         echo "    salloc -N 1 -C cpu -t 04:00:00 --qos=interactive -A m526"
         echo "    bash raman_workflow/run_raman_pipeline_interactive.sh \\"
         echo "      hBN_PBEsol_CPU --cpu"
         echo ""
+        echo "    # Combined flags:"
         echo "    bash raman_workflow/run_raman_pipeline_interactive.sh \\"
         echo "      hBN_LDA --restart"
+        echo "    bash raman_workflow/run_raman_pipeline_interactive.sh \\"
+        echo "      hBN_LDA --scratch --restart"
         exit 0
     elif [ -z "$MATERIAL_NAME" ]; then
         MATERIAL_NAME="$arg"
@@ -103,13 +117,20 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     exit 1
 fi
 
-# ── Read display label from per-material workflow_settings.yaml ──────────────
+# ── Read display label from per-material or shared workflow_settings.yaml ────
+# Priority: per-material file, then shared file, then directory name.
 MATERIAL_LABEL="$MATERIAL_NAME"
+_SHARED_CONFIG_FILE="$RAMAN_PROJECT_DIR/shared_workflow_settings.yaml"
 _CONFIG_FILE="$RAMAN_PROJECT_DIR/$MATERIAL_NAME/workflow_settings.yaml"
-if [ -f "$_CONFIG_FILE" ]; then
-    _PARSED="$(grep -oP '^material:\s*\K.+' "$_CONFIG_FILE" 2>/dev/null || true)"
-    [ -n "$_PARSED" ] && MATERIAL_LABEL="$_PARSED"
-fi
+for _cfg in "$_CONFIG_FILE" "$_SHARED_CONFIG_FILE"; do
+    if [ -f "$_cfg" ]; then
+        _PARSED="$(grep -oP '^material:\s*\K.+' "$_cfg" 2>/dev/null || true)"
+        if [ -n "$_PARSED" ]; then
+            MATERIAL_LABEL="$_PARSED"
+            break
+        fi
+    fi
+done
 
 MODE_STR="GPU"
 [ -n "$CPU_FLAG" ] && MODE_STR="CPU"
@@ -237,8 +258,8 @@ cd "$MATERIAL_DIR" || { echo "ERROR: Cannot cd to $MATERIAL_DIR"; exit 1; }
 echo "Working directory: $(pwd)"
 echo ""
 
-# Run the automation script (forward --restart and --cpu if set)
-python "$SCRIPT_DIR/automation_raman_analysis.py" $RESTART_FLAG $CPU_FLAG
+# Run the automation script (forward --restart, --cpu, and --scratch if set)
+python "$SCRIPT_DIR/automation_raman_analysis.py" $RESTART_FLAG $CPU_FLAG $SCRATCH_FLAG
 
 # ── Post-Run Summary ──────────────────────────────────────────────────────
 echo ""

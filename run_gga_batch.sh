@@ -28,16 +28,20 @@ set -euo pipefail
 # ── Parse arguments ────────────────────────────────────────────────────────────
 RESTART_FLAG=""
 CPU_FLAG=""
+SCRATCH_FLAG=""
 for arg in "$@"; do
     if [ "$arg" = "--restart" ] || [ "$arg" = "-r" ]; then
         RESTART_FLAG="--restart"
     elif [ "$arg" = "--cpu" ]; then
         CPU_FLAG="--cpu"
+    elif [ "$arg" = "--scratch" ]; then
+        SCRATCH_FLAG="--scratch"
     elif [ "$arg" = "-h" ] || [ "$arg" = "--help" ]; then
-        echo "Usage: bash raman_workflow/run_gga_batch.sh [--cpu] [--restart|-r] [-h]"
+        echo "Usage: bash raman_workflow/run_gga_batch.sh [--cpu] [--scratch] [--restart|-r] [-h]"
         echo ""
         echo "  --cpu          Use CPU VASP binary and CPU node srun arguments."
         echo "                 The salloc must use -C cpu (not -C gpu)."
+        echo "  --scratch      Run VASP on \$SCRATCH (fast I/O), keep config on \$HOME."
         echo "  --restart, -r  Delete all generated files and restart from scratch"
         echo "                  for each material. Without this flag, the pipeline"
         echo "                  resumes from the last completed step."
@@ -170,6 +174,7 @@ for MATERIAL in "${MATERIALS[@]}"; do
     EXTRA_ARGS=""
     [ -n "$RESTART_FLAG" ] && EXTRA_ARGS="$EXTRA_ARGS $RESTART_FLAG"
     [ -n "$CPU_FLAG" ] && EXTRA_ARGS="$EXTRA_ARGS $CPU_FLAG"
+    [ -n "$SCRATCH_FLAG" ] && EXTRA_ARGS="$EXTRA_ARGS $SCRATCH_FLAG"
     log ""
     log "  [A] Running Raman pipeline${EXTRA_ARGS}..."
 

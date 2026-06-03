@@ -1,64 +1,25 @@
 # =============================================================================
-# Raman Workflow Settings — TEMPLATE
+# Raman Workflow Settings — Per-Material Template
 # =============================================================================
-# Copy this file into each material directory (e.g., vasp_calculations/hBN/)
-# and add the 'name' + 'material' fields at the top.
+# Copy this file into a new material directory (e.g., vasp_calculations/NewMat/)
+# and customize the fields below. All shared defaults (polarization, energies,
+# VASP srun args, phonopy amplitude, band path, incar_raman, eigenvectors_band,
+# hf_kpoints shift) are inherited from:
 #
-#   name: hBN                    # directory identifier
-#   material: Hexagonal Boron Nitride   # human-readable display label
+#   vasp_calculations/shared_workflow_settings.yaml
+#
+# You only need to set the fields that differ per material.
 # =============================================================================
-_description: "Raman workflow settings template — copy to material dir and customize."
-_version: "2026-05-28"
 
-# ── Material identity (uncomment and fill per-material) ──────────────────────
-# name:     ""
-# material: ""
+# ── Material identity ──────────────────────────────────────────────────────────
+name: ""                          # <-- directory identifier (e.g., "hBN_PBEsol_4x4x1")
 
-# ── Raman tensor polarization settings ───────────────────────────────────────
-raman_tensor:
-  incident_polarization:   "1.0 0.0 0.0"
-  scattered_polarization: "1.0 0.0 0.0"
-  surface_normal: "z"
-
-# ── Laser energies (eV) ──────────────────────────────────────────────────────
-desired_energies:
-  - "1.96"
-  - "2.33"
-
-# ── Phonopy settings ─────────────────────────────────────────────────────────
+# ── Phonopy supercell dimensions ───────────────────────────────────────────────
 phonopy:
-  dim: "4 4 1"
-  amplitude: 0.03
-  band_path: "0 0 0  0.5 0 0  0.333333 0.333333 0  0 0 0"
-  band_labels: "GAMMA M K GAMMA"
-  band_points: 101
+  dim: "4 4 1"                   # <-- supercell size (e.g., "3 3 1", "4 4 1", etc.)
 
-# ── VASP srun arguments ──────────────────────────────────────────────────────
-vasp_srun:
-  gpus: 4
-  ntasks: 4
-  cpus_per_task: 32
-  constraint: "gpu"
-
-# ── VASP loop restart limit ──────────────────────────────────────────────────
-vasp_loop:
-  max_restarts: 3
-
-# ── INCAR Raman extras (appended when copying to RAMAN_DIR) ──────────────────
-incar_raman:
-  enabled: true
-  loptics: true
-  nbands: 64
-  nedos: 50001
-  omegamax: 50
-
-# ── HF k-points (coarse mesh for force constants) ────────────────────────────
+# ── HF k-points (coarse mesh for force constants) ──────────────────────────────
+# Rule of thumb: hf_kpoints.mesh × supercell_dim ≈ primitive-cell k-mesh
+#   e.g.,  primitive 36×36×1,  supercell 4×4×1 → hf_kpoints 6×6×1
 hf_kpoints:
-  mesh: "6 6 1"
-  shift: "0 0 0"
-
-# ── Eigenvectors band path (Gamma-only for Raman) ────────────────────────────
-eigenvectors_band:
-  path: "0.0 0.0 0.0  0.0 0.0 0.0"
-  labels: ""
-  points: 1
+  mesh: "6 6 1"                  # <-- coarse mesh (e.g., "2 2 1" for 3×3×1)

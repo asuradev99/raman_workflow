@@ -19,7 +19,7 @@
 
 ## Supercell size convergence (PBEsol)
 
-All supercell calculations share the same computational settings, derived from the base [`hBN_PBEsol/input/`](vasp_calculations/hBN_PBEsol/input) template:
+All supercell calculations share the same computational settings, derived from the base [`hBN_PBEsol_4x4x1/input/`](vasp_calculations/hBN_PBEsol_4x4x1/input) template:
 
 | Setting | Value |
 |---|---|
