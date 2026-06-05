@@ -15,6 +15,25 @@ import traceback
 import yaml
 
 
+class Tee:
+    """Duplicate all writes to both the real stdout and a log file."""
+    def __init__(self, log_path):
+        self.log = open(log_path, "a")
+        self.stdout = sys.stdout
+
+    def write(self, data):
+        self.stdout.write(data)
+        self.log.write(data)
+        self.log.flush()
+
+    def flush(self):
+        self.stdout.flush()
+        self.log.flush()
+
+    def close(self):
+        self.log.close()
+
+
 def run_command(command, cwd=None, shell=True, check_success=True):
     """
     Executes a shell command.
@@ -88,56 +107,22 @@ def ensure_dim_in_conf(conf_path, label, dim):
     return True
 
 
-def restore_z_lattice_vector(material_dir):
+def check_no_selective_dynamics(filepath, context=""):
+    """Guard: raise a RuntimeError if *filepath* contains VASP Selective Dynamics.
+
+    Selective Dynamics (``T T F``) is only valid for the initial unit-cell
+    relaxation (Step 3).  If it propagates into phonopy displacement or Raman
+    POSCAR files, force constants or Raman tensors will be silently wrong.
     """
-    Replace the 3rd lattice vector (z-axis) in CONTCAR with the original value
-    from input/POSCAR. This prevents vacuum compression in 2D slab calculations
-    while preserving in-plane (x,y) relaxation.
-
-    Args:
-        material_dir: Path to the material directory (e.g., /path/to/hBN_PBE)
-    """
-    poscar_path = os.path.join(material_dir, "input", "POSCAR")
-    # CONTCAR lives in scf/ (VASP runs there)
-    contcar_path = os.path.join(material_dir, "scf", "CONTCAR")
-
-    if not os.path.exists(poscar_path):
-        print("  [z-fix] input/POSCAR not found — cannot restore z lattice vector. Skipping.")
-        return
-    if not os.path.exists(contcar_path):
-        print("  [z-fix] CONTCAR not found — nothing to fix. Skipping.")
-        return
-
-    # Read original 3rd lattice vector from input/POSCAR (line 4, 0-indexed)
-    with open(poscar_path) as pf:
-        poscar_lines = pf.readlines()
-    if len(poscar_lines) < 5:
-        print(f"  [z-fix] input/POSCAR has only {len(poscar_lines)} lines — unexpected format. Skipping.")
-        return
-    orig_z_line = poscar_lines[4].strip()
-    orig_z_parts = orig_z_line.split()
-    if len(orig_z_parts) < 3:
-        print(f"  [z-fix] Could not parse 3rd lattice vector from input/POSCAR line 5: '{orig_z_line}'. Skipping.")
-        return
-
-    # Read relaxed CONTCAR
-    with open(contcar_path) as cf:
-        contcar_lines = cf.readlines()
-    if len(contcar_lines) < 5:
-        print(f"  [z-fix] CONTCAR has only {len(contcar_lines)} lines — unexpected format. Skipping.")
-        return
-
-    # Log what changed
-    relaxed_z_line = contcar_lines[4].strip()
-    print(f"  [z-fix] Original z lattice vector (input/POSCAR):  {orig_z_line}")
-    print(f"  [z-fix] Relaxed z lattice vector (CONTCAR before): {relaxed_z_line}")
-
-    # Replace the 3rd lattice vector in CONTCAR
-    contcar_lines[4] = poscar_lines[4]
-    with open(contcar_path, "w") as cf:
-        cf.writelines(contcar_lines)
-
-    print(f"  [z-fix] Restored z lattice vector in CONTCAR to:  {orig_z_line}")
+    if not os.path.exists(filepath):
+        return  # let the caller decide what to do about missing files
+    with open(filepath) as f:
+        for i, line in enumerate(f, 1):
+            if "selective" in line.lower():
+                raise RuntimeError(
+                    f"Selective Dynamics detected in {filepath} (line {i})"
+                    + (f" — {context}" if context else "")
+                )
 
 
 def is_vasprun_valid(filepath):
@@ -178,10 +163,15 @@ def merge_config(target_config, file_config, label=""):
 
 def parse_resume_step(status_file, step_history, step_descriptions):
     """
-    Parse a workflow status file to determine which step to resume from.
+    Parse a unified workflow log (box-drawn table format) to determine which
+    step to resume from.
 
-    Populates *step_history* with entries for steps marked COMPLETED so
-    that write_status() can display an accurate history on restart.
+    Populates *step_history* with entries for completed/failed steps so that
+    write_status() can display an accurate history on restart.
+
+    The parser searches for the **last** occurrence of the status table in the
+    file (the file is append-only, so the last block is the most current),
+    then extracts each row's step number and status.
 
     Returns:
         int: Step number to resume from (3–20), or ``None`` if all steps
@@ -195,26 +185,72 @@ def parse_resume_step(status_file, step_history, step_descriptions):
         with open(status_file) as f:
             content = f.read()
 
+        # Find the LAST status table in the file (append-only format).
+        # The table starts with ┌─── and ends with └─── (box-drawing chars).
+        # We split by ┌─ to find all tables, take the last one.
+        table_starts = [i for i, c in enumerate(content) if c == '\u250c']
+        if not table_starts:
+            # No table found — treat as fresh start
+            print(f"[resume] No status table found in {status_file}. Starting from step 3.")
+            return 3
+
+        last_table_start = table_starts[-1]
+        table_end = content.find('\u2514', last_table_start)
+        if table_end == -1:
+            table_end = len(content)
+
+        table_section = content[last_table_start:table_end]
+
+        # Parse rows: │ 14 │ ▶ │ ACTIVE │ ...
+        # Pattern: │ <step_num> │ <icon> │ <status> │ ...
         completed_steps = set()
-        for match in re.finditer(r'STEP\s+(\d+)\s+\[\s*COMPLETED\]', content):
-            step_num = int(match.group(1))
-            completed_steps.add(step_num)
-            step_history[step_num] = {
-                "status": "completed",
+        running_step = None
+        failed_step = None
+
+        for line in table_section.split('\n'):
+            line = line.strip()
+            if not line.startswith('\u2502'):
+                continue
+            parts = [p.strip() for p in line.split('\u2502')]
+            # parts[0] is empty (before first │), parts[1] = step, parts[2] = icon,
+            # parts[3] = status text, parts[4] = description
+            if len(parts) < 4:
+                continue
+            try:
+                step_num = int(parts[1])
+            except (ValueError, IndexError):
+                continue
+
+            status_text = parts[3].strip().upper() if len(parts) > 3 else ""
+
+            if status_text == "DONE":
+                completed_steps.add(step_num)
+                step_history[step_num] = {
+                    "status": "completed",
+                    "start_ts": 0,
+                    "end_ts": 0,
+                    "message": "Resumed \u2014 completed in previous run",
+                }
+            elif status_text == "ACTIVE":
+                running_step = step_num
+            elif status_text == "FAIL":
+                failed_step = step_num
+
+        # Priority: running (crashed) > failed > first non-completed
+        if running_step is not None:
+            step_history[running_step] = {
+                "status": "running",
                 "start_ts": 0,
                 "end_ts": 0,
-                "message": "Resumed — completed in previous run",
+                "message": "Interrupted \u2014 was RUNNING",
             }
-
-        # Check for a step that was RUNNING (likely crashed)
-        running_step = None
-        for match in re.finditer(r'STEP\s+(\d+)\s+\[\s*RUNNING\]', content):
-            running_step = int(match.group(1))
-
-        if running_step is not None:
-            print(f"[resume] Step {running_step} was RUNNING (likely failed). "
+            print(f"[resume] Step {running_step} was ACTIVE (likely crashed). "
                   f"Retrying from step {running_step}.")
             return running_step
+
+        if failed_step is not None:
+            print(f"[resume] Step {failed_step} was FAILED. Retrying from step {failed_step}.")
+            return failed_step
 
         # Find the first non-completed step
         all_step_keys = sorted(k for k in step_descriptions if isinstance(k, int))
@@ -233,18 +269,89 @@ def parse_resume_step(status_file, step_history, step_descriptions):
         return 3
 
 
+def write_kpoints(path, comment, mesh, shift):
+    """Write a Gamma-centred KPOINTS file."""
+    with open(path, "w") as f:
+        f.write(f"{comment}\n")
+        f.write("0\n")
+        f.write("Gamma\n")
+        f.write(f"{mesh}\n")
+        f.write(f"{shift}\n")
+
+
+def write_incar(path, config, stage, cpu_flag):
+    """Assemble, validate, and write an INCAR file in one call.
+
+    Combines :func:`build_incar_content` + :func:`validate_incar_lscalapack` + write.
+    """
+    content = build_incar_content(config, stage, cpu_flag)
+    validate_incar_lscalapack(content, cpu_flag)
+    with open(path, "w") as f:
+        f.write(content)
+
+
+def count_ionic_steps(outcar_dir):
+    """Return the number of ionic steps from OUTCAR, or 0 if OUTCAR is absent."""
+    outcar = os.path.join(outcar_dir, "OUTCAR")
+    if not os.path.exists(outcar):
+        return 0
+    with open(outcar) as f:
+        return sum(1 for line in f if re.match(r"\s+Iteration\s+\d+\(\s*\d+\)", line))
+
+
+def generate_kopia_script(raman_dir, ra_dirs):
+    """Write and execute the kopia script that copies vasprun.xml files to AXML/.
+
+    ``genRAram610_dynamic`` expects ``B1a.xml``, not ``ra_pos_B1a.xml``, so the
+    ``ra_pos_`` prefix is stripped when naming the destination files.
+    """
+    kopia_path = os.path.join(raman_dir, "kopia")
+    with open(kopia_path, "w") as kf:
+        kf.write("#!/bin/bash\n")
+        kf.write("# Dynamically generated by automation_raman_analysis.py\n")
+        kf.write("mkdir -p AXML\n")
+        for d in ra_dirs:
+            dirname = os.path.basename(d)
+            xml_name = dirname[len("ra_pos_"):] if dirname.startswith("ra_pos_") else dirname
+            kf.write(f'cp "{dirname}/vasprun.xml" "AXML/{xml_name}.xml"\n')
+    run_command(f"chmod +x kopia && ./kopia", cwd=raman_dir)
+
+
+def inject_ramfile_energies(template_path, dst_path, energies):
+    """Inject custom laser energies into ``ramfile_dynamic.sh`` and write to *dst_path*.
+
+    Raises :exc:`RuntimeError` if the template lacks the expected
+    ``desired_energies=(...)`` line.
+    """
+    with open(template_path) as f:
+        template = f.read()
+    energies_str = " ".join(f'"{e}"' for e in energies)
+    match = re.search(r'^desired_energies=\([^)]*\)', template, re.MULTILINE)
+    if not match:
+        raise RuntimeError(
+            "ramfile_dynamic.sh does not contain the expected "
+            "'desired_energies=(...)' line — cannot inject custom energies. "
+            "Ensure the template has a line like: desired_energies=(\"1.96\" \"2.33\")"
+        )
+    content = template.replace(match.group(0), f"desired_energies=({energies_str})")
+    with open(dst_path, "w") as f:
+        f.write(content)
+    os.chmod(dst_path, 0o755)
+    print(f"  [setup] Generated {os.path.basename(dst_path)} with energies: {energies_str}")
+
+
 def make_pipeline_excepthook(status_file):
-    """Return a sys.excepthook that appends a full traceback to *status_file* on crash."""
+    """Return a sys.excepthook that appends a formatted traceback to *status_file* on crash."""
     def hook(exc_type, exc_value, exc_tb):
         tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
         print(tb_text, file=sys.stderr)
         try:
             with open(status_file, "a") as f:
-                f.write("\n" + "=" * 80 + "\n")
-                f.write("  UNHANDLED EXCEPTION — Full Traceback\n")
-                f.write("=" * 80 + "\n")
+                f.write("\n" + "\u2501" * 78 + "\n")
+                f.write("  \u2717 UNHANDLED EXCEPTION \u2014 Full Traceback\n")
+                f.write("\u2501" * 78 + "\n")
                 f.write(tb_text)
-                f.write("=" * 80 + "\n")
+                f.write("\u2501" * 78 + "\n")
         except Exception:
             pass
     return hook
@@ -353,6 +460,7 @@ def update_wavecar_symlinks(hffiles_dir):
 
     print(f"  Replaced symlinks in {len(displacement_dirs)} displacement dirs:")
     print(f"    hf_POSCAR-*/WAVECAR → ../groundstate/WAVECAR  (1 hop)")
+    return len(displacement_dirs)
 
 
 def update_chgcar_symlinks(hffiles_dir):
@@ -361,8 +469,7 @@ def update_chgcar_symlinks(hffiles_dir):
     runHF does not create CHGCAR symlinks.  This function mirrors
     :func:`update_wavecar_symlinks` so that displacement VASP runs
     can read the precomputed charge density from the supercell static
-    groundstate (generated in Step 4, stored in ``hf/relax/``, and
-    symlinked into ``hf/groundstate/`` in Step 8).
+    groundstate (generated in Step 4, stored in ``hf/groundstate/``).
 
     Returns the number of symlinks created, or 0 if ``groundstate/CHGCAR``
     is absent.
@@ -426,41 +533,49 @@ TOTAL_STEPS = 20
 def write_status(step, status, message="", *,
                  status_file, material_label, material_name, base_project_dir):
     """
-    Write a verbose plain-text workflow status file.
+    Write a combined status-overview + chronological log entry to *status_file*.
 
-    The pipeline-specific parameters (status_file, material_label,
-    material_name, base_project_dir) are keyword-only so that callers
-    must pass them explicitly — typically via a thin wrapper in the
-    main module that captures the pipeline's global variables.
+    The format uses box-drawing characters and section headers:
+
+        ━━━━ RAMAN WORKFLOW ━━━━ ... ━━━━
+          Status table (box-drawn, one row per step)
+        ━━━━ STEP LOG ━━━━
+          [timestamp] log entries...
+
+    The file is **append-only** — write_status() appends a new formatted
+    status block on every call.  Because ``sys.stdout`` is typically
+    redirected to the same file via ``Tee``, the chronological log entries
+    from ``print()`` appear between status blocks automatically.
+
+    Pipeline-specific parameters (status_file, material_label,
+    material_name, base_project_dir) are keyword-only — typically provided
+    via ``make_write_status()``.
 
     Args:
-        step:           Step number (int or "final")
-        status:         "running", "completed", or "failed"
-        message:        Optional descriptive message about what happened
-        status_file:    Path to the status file to write
-        material_label: Short label for the material
-        material_name:  Full material name
-        base_project_dir: Base project directory path
+        step:           Step number (int or ``"final"``).
+        status:         ``"running"``, ``"completed"``, or ``"failed"``.
+        message:        Optional descriptive message.
+        status_file:    Path to the unified workflow log / status file.
+        material_label: Short label for the material.
+        material_name:  Full material name.
+        base_project_dir: Base project directory path.
     """
     now_ts = time.time()
     now_str = fmt_time(now_ts)
     step_desc = STEP_DESCRIPTIONS.get(step, f"Step {step}")
 
-    # Track start time if this is the first call for the step,
-    # but also keep the original start if it was already set as "running"
+    # Track start time for the step
     if step not in STEP_HISTORY:
         STEP_HISTORY[step] = {"start_ts": now_ts}
     elif status == "completed" and STEP_HISTORY[step].get("status") == "running":
-        # Transition from running → completed: keep original start time
-        pass
+        pass  # keep original start time
 
     STEP_HISTORY[step]["end_ts"] = now_ts
     STEP_HISTORY[step]["status"] = status
     if message:
         STEP_HISTORY[step]["message"] = message
 
-    # Determine overall pipeline status
-    overall_status = "RUNNING"
+    # Overall pipeline status
     any_failed = any(
         h.get("status") == "failed"
         for h in STEP_HISTORY.values()
@@ -469,105 +584,111 @@ def write_status(step, status, message="", *,
         overall_status = "FAILED"
     elif status == "completed" and step == "final":
         overall_status = "COMPLETED"
+    else:
+        overall_status = "RUNNING"
 
-    # Get pipeline start time from the first tracked step
     pipeline_start = STEP_HISTORY.get(3, {}).get("start_ts", now_ts)
 
-    # ── Build the status file content ──────────────────────────────────────
-    lines = []
-    sep = "=" * 80
+    # ── Helper: duration string ────────────────────────────────────────────
+    def _dur(s, e):
+        return calc_duration(s, e) if s and e else ""
 
-    lines.append(sep)
-    lines.append("  RAMAN WORKFLOW STATUS")
-    lines.append(sep)
-    lines.append("")
-    lines.append(f"  Material:         {material_label}  ({material_name})")
-    lines.append(f"  Project Dir:      {base_project_dir}")
-    lines.append(f"  Started:          {fmt_time(pipeline_start)}")
-    lines.append(f"  Last Updated:     {now_str}")
-    lines.append(f"  Overall Status:   {overall_status}")
+    # ── Helper: status icon ────────────────────────────────────────────────
+    def _icon(sts):
+        return {"completed": "\u2713", "running": "\u25B6",
+                "failed": "\u2717"}.get(sts, "\u2014")
+
+    # Determine running / failed step info
     running_step = None
     for k, h in STEP_HISTORY.items():
         if h.get("status") == "running" and k != "final":
             running_step = k
+
+    # ═══════════════════════════════════════════════════════════════════════
+    #  Build the status block
+    # ═══════════════════════════════════════════════════════════════════════
+    lines = []
+
+    # ── Header ─────────────────────────────────────────────────────────────
+    lines.append("")
+    lines.append("\u2501" * 78)
+    header = (
+        f"  RAMAN WORKFLOW  \u2502  {material_name}  "
+        f"\u2502  {now_str}"
+    )
+    lines.append(header)
+    lines.append("\u2501" * 78)
+    lines.append("")
+
+    # ── Summary line ───────────────────────────────────────────────────────
+    elapsed = calc_duration(pipeline_start, now_ts) if pipeline_start else ""
+    summary_parts = [f"Status   {overall_status}"]
     if running_step is not None:
         r_desc = STEP_DESCRIPTIONS.get(running_step, f"Step {running_step}")
-        lines.append(f"  Current Step:     {running_step}  —  {r_desc}")
+        summary_parts.append(f"\u2014 Step {running_step} ({r_desc})")
+    if overall_status == "FAILED" and message:
+        summary_parts.append(f"\u2014 {message}")
+    lines.append(f"  {'  '.join(summary_parts)}")
+    lines.append(f"  Started  {fmt_time(pipeline_start)}")
+    lines.append(f"  Elapsed  {elapsed}")
     lines.append("")
 
-    # ═══ STEP HISTORY ══════════════════════════════════════════════════════
-    lines.append(sep)
-    lines.append("  STEP HISTORY")
-    lines.append(sep)
-    lines.append("")
-
-    completed_keys = sorted(
-        [k for k in STEP_HISTORY if isinstance(k, int)],
-        key=lambda x: (isinstance(x, int), x)
+    # ── Step status table ──────────────────────────────────────────────────
+    # Collect all step keys (3-20 + "final") in display order
+    table_keys = sorted(
+        k for k in STEP_DESCRIPTIONS if isinstance(k, int)
     )
-    # Sort by start time for chronological order
-    completed_keys.sort(key=lambda k: STEP_HISTORY[k].get("start_ts", 0))
+    # Build rows
+    rows = []
+    for s in table_keys:
+        h = STEP_HISTORY.get(s, {})
+        sts = h.get("status", "")
+        desc = STEP_DESCRIPTIONS[s]
+        icon = _icon(sts)
+        dur = _dur(h.get("start_ts"), h.get("end_ts"))
+        # Truncate description to fit table
+        desc_display = desc[:40]
+        rows.append((s, icon, sts.upper() if sts else "\u2014", desc_display, dur))
 
-    for s in completed_keys:
-        h = STEP_HISTORY[s]
-        desc = STEP_DESCRIPTIONS.get(s, f"Step {s}")
-        sts = h.get("status", "UNKNOWN").upper()
-        start_ts = h.get("start_ts")
-        end_ts = h.get("end_ts")
-        msg = h.get("message", "")
+    col_widths = [4, 3, 8, 42, 8]  # step, icon, status, desc, duration
+    sep_line = "\u2500" * (sum(col_widths) + len(col_widths) + 1)
 
-        # Format the status tag with padding
-        status_tag = f"[{sts:>9}]"
+    def _fmt_row(cols):
+        parts = []
+        for i, (c, w) in enumerate(zip(cols, col_widths)):
+            if i == 0:
+                parts.append(f"{c:>{w}}")
+            elif i == 1:
+                parts.append(f" {c} ")
+            elif i == 2:
+                parts.append(f"{c:<{w}}")
+            elif i == 3:
+                parts.append(f"{c:<{w}}")
+            else:
+                parts.append(f"{c:>{w}}")
+        return "\u2502 " + " \u2502 ".join(parts) + " \u2502"
 
-        lines.append(f"  STEP {s:<3}  {status_tag}  {desc}")
-        if start_ts:
-            lines.append(f"           Started:     {fmt_time(start_ts)}")
-        if end_ts and sts in ("COMPLETED", "FAILED"):
-            duration_str = calc_duration(start_ts, end_ts) if start_ts else ""
-            lines.append(f"           Ended:       {fmt_time(end_ts)}  ({duration_str})")
-        if msg:
-            # Word-wrap message at 70 chars
-            while len(msg) > 70:
-                lines.append(f"           Note:       {msg[:70]}")
-                msg = msg[70:]
-            lines.append(f"           Note:       {msg}")
-        lines.append("")
+    # Table top
+    lines.append("  \u250c" + sep_line + "\u2510")
+    lines.append("  " + _fmt_row(["#", "", "Status", "Description", "Duration"]))
+    lines.append("  \u2502" + sep_line + "\u2502")
 
-    # ═══ REMAINING STEPS ══════════════════════════════════════════════════
-    lines.append(sep)
-    lines.append("  REMAINING STEPS")
-    lines.append(sep)
+    for s, icon, sts_text, desc, dur in rows:
+        lines.append("  " + _fmt_row([s, icon, sts_text, desc, dur]))
+
+    lines.append("  \u2514" + sep_line + "\u2518")
     lines.append("")
 
-    all_step_keys = sorted(
-        [k for k in STEP_DESCRIPTIONS if isinstance(k, int)]
-    )
-    done_or_running = set()
-    for k, h in STEP_HISTORY.items():
-        if isinstance(k, int) and h.get("status") in ("completed", "running", "failed"):
-            done_or_running.add(k)
-
-    remaining = [s for s in all_step_keys if s not in done_or_running]
-    if remaining:
-        for s in remaining:
-            lines.append(f"  Step {s:<3}  {STEP_DESCRIPTIONS[s]}")
-    else:
-        lines.append("  (none — all steps have been attempted)")
-
-    # ═══ ERROR SECTION ════════════════════════════════════════════════════
-    if status == "failed" or any_failed:
-        lines.append("")
-        lines.append(sep)
-        lines.append("  ERROR")
-        lines.append(sep)
-        lines.append(f"  {message}")
-
+    # ── Step log section marker ────────────────────────────────────────────
+    # (Chronological entries from Tee+print() appear below this marker.)
+    lines.append("\u2501" * 78)
+    lines.append(f"  STEP LOG")
+    lines.append("\u2501" * 78)
     lines.append("")
-    lines.append(sep)
 
-    # ── Write the status file ──────────────────────────────────────────────
+    # ── Append the status block to the file ────────────────────────────────
     try:
-        with open(status_file, "w") as f:
+        with open(status_file, "a") as f:
             f.write("\n".join(lines) + "\n")
     except Exception as e:
         print(f"[status] Warning: Could not write status file: {e}")
@@ -600,108 +721,167 @@ def make_write_status(status_file, material_label, material_name, base_project_d
     return _inner
 
 
-# ── NBANDS auto-scaling ───────────────────────────────────────────────────────
-# Hardcoded NBANDS=64 in input/INCAR fails for large supercells (e.g., 5x5x1
-# has NELECT=200, requiring at least 100 bands). This function dynamically
-# calculates NBANDS from the primitive cell, POTCAR ZVAL, and phonopy.dim.
-def calculate_nbands(poscar_path, potcar_path, phonopy_dim, buffer_factor=1.3):
+def build_incar_content(config, stage, cpu_flag=False):
+    """Assemble an INCAR file content string from YAML config sources.
+
+    The assembly order ensures VASP's "last value wins" semantics:
+
+      1. Base template (``incar_templates.{stage}`` from *config*).
+      2. Per-material overrides (``incar_settings.{stage}`` from *config*),
+         if present — these override base-template tags for this material.
+      3. Arch override — ``incar_gpu_settings`` or ``incar_cpu_settings``
+         from *config*, auto-appended based on *cpu_flag*. This sets
+         ``LSCALAPACK`` to ``.FALSE.`` (GPU) or ``.TRUE.`` (CPU) and
+         always wins, so per-material YAMLs never need to repeat it.
+
+    Parameters
+    ----------
+    config : dict
+        The merged pipeline configuration (fallback + shared + per-material).
+        Must contain ``incar_templates`` with a *stage* key.
+    stage : str
+        One of ``"relax"``, ``"dielec"``, ``"hf"``, or ``"static"``.
+    cpu_flag : bool
+        ``True`` to use ``incar_cpu_settings`` (LSCALAPACK=.TRUE.),
+        ``False`` to use ``incar_gpu_settings`` (LSCALAPACK=.FALSE.).
+
+    Returns
+    -------
+    str
+        Complete INCAR file content ready to write to disk.
     """
-    Calculate appropriate NBANDS for a supercell VASP calculation.
+    # 1. Base template
+    templates = config.get("incar_templates", {})
+    base = templates.get(stage, "")
+    if not base:
+        raise KeyError(
+            f"Missing incar_templates.{stage} in pipeline config. "
+            f"Available stages: {list(templates.keys())}"
+        )
 
-    Reads the primitive POSCAR to get atom counts per species, reads POTCAR to
-    get ZVAL (valence electrons), then scales by supercell dimensions from
-    phonopy.dim. Adds a buffer_factor (>1.0) to provide empty bands.
+    # 2. Per-material overrides (GGA, NBANDS, etc. — NOT LSCALAPACK)
+    per_material = config.get("incar_settings", {}).get(stage, "")
 
-    Returns:
-        int: Recommended NBANDS value, or None if parsing fails.
+    # 3. Arch override (LSCALAPACK matching target hardware)
+    arch_key = "incar_cpu_settings" if cpu_flag else "incar_gpu_settings"
+    arch_override = config.get(arch_key, "")
+    if not arch_override:
+        label = "CPU" if cpu_flag else "GPU"
+        raise KeyError(
+            f"Missing {arch_key} in config — required for {label} mode. "
+            f"Add it to shared_workflow_settings.yaml."
+        )
+
+    # Combine with blank-line separators for readability
+    parts = [base]
+    if per_material:
+        parts.append(per_material)
+    parts.append(arch_override)
+
+    return "\n".join(parts) + "\n"
+
+
+def validate_incar_lscalapack(incar_content, cpu_flag):
+    """Check that an INCAR content string contains the expected ``LSCALAPACK`` value.
+
+    Parameters
+    ----------
+    incar_content : str
+        The INCAR file content to scan.
+    cpu_flag : bool
+        ``True`` if running on CPU (expects ``LSCALAPACK = .TRUE.``),
+        ``False`` if running on GPU (expects ``LSCALAPACK = .FALSE.``).
+
+    Raises
+    ------
+    ValueError
+        If ``LSCALAPACK`` is missing or set to the wrong value.
     """
-    # ── Parse POSCAR for atom counts per species ──────────────────────────
-    # VASP POSCAR format (without selective dynamics):
-    #   line 1: comment
-    #   line 2: scale factor
-    #   lines 3-5: lattice vectors
-    #   line 6: species names (optional)
-    #   line 7: atom counts
-    # With selective dynamics, an extra line appears after each lattice vector
-    # and after the atom-counts line. We handle both cases by finding the first
-    # line after the lattice vectors that contains only digits/whitespace.
-    try:
-        with open(poscar_path) as f:
-            lines = f.readlines()
-    except (IOError, OSError) as e:
-        print(f"  [nbands] WARNING: Cannot read POSCAR '{poscar_path}': {e}")
-        return None
+    expected = ".TRUE." if cpu_flag else ".FALSE."
+    label = "CPU" if cpu_flag else "GPU"
 
-    # Find atom-counts line: first line after the 3 lattice vectors (lines 2-4,
-    # 0-indexed) that contains only digits and whitespace.
-    atom_counts_line = None
-    for i in range(5, len(lines)):
-        stripped = lines[i].strip()
-        if stripped and all(c.isdigit() or c.isspace() for c in stripped):
-            atom_counts_line = stripped
-            break
+    # Extract the last LSCALAPACK value (VASP "last value wins")
+    matches = re.findall(
+        r"^\s*LSCALAPACK\s*=\s*\.(TRUE|FALSE)\.\s*$",
+        incar_content,
+        re.MULTILINE | re.IGNORECASE,
+    )
+    if not matches:
+        raise ValueError(
+            f"LSCALAPACK validation FAILED — tag not found in INCAR content "
+            f"({label} mode expected LSCALAPACK = {expected}). "
+            f"Ensure incar_gpu_settings or incar_cpu_settings in "
+            f"shared_workflow_settings.yaml contains LSCALAPACK = {expected}."
+        )
+    actual_value = matches[-1].upper()
+    expected_value = "TRUE" if cpu_flag else "FALSE"
+    if actual_value != expected_value:
+        raise ValueError(
+            f"LSCALAPACK mismatch! Expected {expected} for {label} mode, "
+            f"but last occurrence is LSCALAPACK = .{actual_value}.\n"
+            f"Fix incar_gpu_settings or incar_cpu_settings in "
+            f"shared_workflow_settings.yaml."
+        )
+    print(f"  [validate] LSCALAPACK = .{actual_value}.  ({label} mode: OK)")
 
-    if atom_counts_line is None:
-        print(f"  [nbands] WARNING: Could not find atom-counts line in POSCAR: {poscar_path}")
-        return None
 
-    atom_counts = [int(x) for x in atom_counts_line.split()]
-    total_atoms_primitive = sum(atom_counts)
+def check_vasp_convergence(outcar_dir, stage_label=""):
+    """Check that VASP completed and converged in *outcar_dir*/OUTCAR.
 
-    # ── Parse POTCAR for ZVAL per species ─────────────────────────────────
-    # POTCAR contains lines like:
-    #   POMASS =   10.811; ZVAL   =    3.000    mass and valenz
-    zvals = []
-    try:
-        with open(potcar_path) as f:
-            for line in f:
-                if 'ZVAL' in line:
-                    match = re.search(r'ZVAL\s*=\s*([\d.]+)', line)
-                    if match:
-                        zvals.append(float(match.group(1)))
-    except (IOError, OSError) as e:
-        print(f"  [nbands] WARNING: Cannot read POTCAR '{potcar_path}': {e}")
-        return None
+    Parameters
+    ----------
+    outcar_dir : str
+        Directory containing the VASP OUTCAR file.
+    stage_label : str, optional
+        Label for log messages (e.g. ``"step-3"``).
 
-    if len(zvals) != len(atom_counts):
-        print(f"  [nbands] WARNING: Got {len(zvals)} ZVAL values but {len(atom_counts)} "
-              f"species — cannot calculate NBANDS.")
-        return None
+    Raises
+    ------
+    RuntimeError
+        If OUTCAR is missing or VASP did not complete (no
+        ``"General timing and accounting"`` footer).
+    """
+    prefix = f"  [vasp:{stage_label}]" if stage_label else "  [vasp]"
+    outcar_path = os.path.join(outcar_dir, "OUTCAR")
+    if not os.path.exists(outcar_path):
+        raise RuntimeError(
+            f"{prefix} OUTCAR not found at {outcar_path} — "
+            f"VASP likely did not run or crashed immediately."
+        )
+    with open(outcar_path) as f:
+        content = f.read()
+    if "General timing and accounting" not in content:
+        # ── ZBRENT non-fatal guard ──────────────────────────────────────────────
+        # VASP's conjugate-gradient line search can crash with ZBRENT error when
+        # the structure is already converged.  If forces < 0.01 eV/Å, continue.
+        stdout_path = os.path.join(outcar_dir, "relaxation.stdout")
+        if os.path.exists(stdout_path):
+            with open(stdout_path) as _f:
+                if "ZBRENT: fatal error in bracketing" in _f.read():
+                    blocks = re.findall(
+                        r"TOTAL-FORCE \(eV/Angst\)\n\s*-+\n(.*?)\n\s*-+",
+                        content, re.DOTALL
+                    )
+                    if blocks:
+                        lines = [l.split() for l in
+                                 blocks[-1].strip().split("\n")
+                                 if len(l.split()) >= 6]
+                        max_f = max(
+                            (float(p[3])**2 + float(p[4])**2 + float(p[5])**2)**0.5
+                            for p in lines
+                        )
+                        if max_f < 0.01:
+                            print(f"{prefix} ZBRENT error — forces converged "
+                                  f"(max |F| = {max_f:.6f} eV/Å). Continuing.")
+                            return
 
-    # ── Calculate NELECT in primitive cell ─────────────────────────────────
-    nelect_primitive = sum(c * z for c, z in zip(atom_counts, zvals))
-
-    # ── Parse phonopy.dim ──────────────────────────────────────────────────
-    dim_parts = phonopy_dim.split()
-    if len(dim_parts) < 3:
-        print(f"  [nbands] WARNING: phonopy dim '{phonopy_dim}' has < 3 components")
-        return None
-    try:
-        dim_mult = [int(x) for x in dim_parts[:3]]
-    except ValueError:
-        print(f"  [nbands] WARNING: Could not parse phonopy dim components: '{phonopy_dim}'")
-        return None
-    supercell_factor = dim_mult[0] * dim_mult[1] * dim_mult[2]
-
-    # ── Calculate NELECT in supercell ──────────────────────────────────────
-    nelect_supercell = nelect_primitive * supercell_factor
-
-    # Each band holds 2 electrons (non-spin-polarized).  Add buffer for
-    # empty bands (improves convergence and avoids "highest band occupied"
-    # warnings).
-    min_nbands = int(nelect_supercell / 2)
-    nbands = int(min_nbands * buffer_factor)
-    if nbands <= min_nbands:
-        nbands = min_nbands + 1
-
-    # Round up to nearest 16 (convenient divisor for parallelization)
-    nbands = ((nbands + 15) // 16) * 16
-
-    print(f"  [nbands] Primitive cell: {total_atoms_primitive} atoms, "
-          f"{nelect_primitive:.0f} electrons")
-    print(f"  [nbands] Phonopy dim: {phonopy_dim}  →  supercell factor = {supercell_factor}")
-    print(f"  [nbands] Supercell: ~{total_atoms_primitive * supercell_factor} atoms, "
-          f"{nelect_supercell:.0f} electrons → NBANDS = {nbands} "
-          f"(min required: {min_nbands}, buffer: {buffer_factor})")
-
-    return nbands
+        raise RuntimeError(
+            f"{prefix} VASP did not complete normally "
+            f"(no 'General timing and accounting' footer in OUTCAR)."
+        )
+    if "reached required accuracy" in content:
+        print(f"{prefix} VASP converged successfully")
+    else:
+        print(f"{prefix} WARNING: VASP did NOT reach convergence "
+              f"(no 'reached required accuracy').")
+        print(f"{prefix} The calculation finished but may not be fully converged.")

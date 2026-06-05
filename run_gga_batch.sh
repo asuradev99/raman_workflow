@@ -61,11 +61,14 @@ done
 # Edit this list to change which materials are processed.
 MATERIALS=(
     "hBN_PBEsol_6x6x1"
+    "hBN_PBEsol_5x5x1"
+    "hBN_PBEsol_4x4x1"
+    "hBN_PBEsol_3x3x1"
 )
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-SUMMARY_LOG="${SCRIPT_DIR}/gga_workflow_${TIMESTAMP}.log"
+SUMMARY_LOG="$(dirname "$SCRIPT_DIR")/log/gga_workflow_${TIMESTAMP}.log"
 
 # ── Logging helper ────────────────────────────────────────────────────────────
 log() {
@@ -235,14 +238,16 @@ log ""
 
 for MATERIAL in "${MATERIALS[@]}"; do
     MATERIAL_DIR="$RAMAN_PROJECT_DIR/$MATERIAL"
-    STATUS_FILE="${MATERIAL_DIR}/workflow_status.txt"
+    STATUS_FILE="${MATERIAL_DIR}/workflow.log"
     OUTPUT_DIR="${MATERIAL_DIR}/output"
 
     if [ -f "$STATUS_FILE" ]; then
-        FINAL_STATUS=$(grep -oP 'Overall Status:\s*\K.+' "$STATUS_FILE" 2>/dev/null || echo "unknown")
+        # Extract overall status from the last status block in the unified log
+        FINAL_STATUS=$(grep -oP 'Status\s+\K(RUNNING|COMPLETED|FAILED)' "$STATUS_FILE" | tail -1 || echo "unknown")
+        [ -z "$FINAL_STATUS" ] && FINAL_STATUS="unknown"
         log "  ${MATERIAL}: ${FINAL_STATUS}"
     else
-        log "  ${MATERIAL}: No status file found"
+        log "  ${MATERIAL}: No workflow.log found"
     fi
 
     # List output files

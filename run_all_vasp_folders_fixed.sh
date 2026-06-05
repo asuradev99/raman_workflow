@@ -12,8 +12,8 @@
 VASP_BINARY_PATH="${VASP_BINARY:-/global/cfs/cdirs/m526/liangbo/bin/gpu/vasp_std}"
 MODULES_TO_LOAD="${VASP_MODULES:-gpu PrgEnv-nvidia cray-hdf5 cray-fftw nccl/2.18.3-cu12 vasp/6.4.3-gpu}"
 
-# srun parameters — keep in sync with vasp_srun settings in workflow_settings.yaml.
-SRUN_PARAMS="--cpu_bind=cores --gpus 4 --ntasks 4 --cpus-per-task 32"
+# srun parameters — read from env var (set by pipeline's build_srun_args()) or fall back to GPU defaults.
+SRUN_PARAMS="${SRUN_ARGS:---cpu_bind=cores --gpus 4 --ntasks 4 --cpus-per-task 32}"
 
 echo "Starting VASP runs in subdirectories..."
 echo "VASP binary: $VASP_BINARY_PATH"

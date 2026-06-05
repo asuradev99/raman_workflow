@@ -193,8 +193,8 @@ The `--scratch` flag redirects VASP output to `$SCRATCH` (NERSC's fast scratch f
 | Aspect | Default (HOME) | `--scratch` |
 |--------|---------------|-------------|
 | Config source (`input/`, `workflow_settings.yaml`) | `$HOME/vasp_calculations/<material>/` | Same — stays on HOME |
-| VASP output (`scf/`, `hf/`, `raman/`) | `$HOME/vasp_calculations/<material>/` | `$SCRATCH/vasp_work/<material>/` |
-| `workflow_status.txt` | `$HOME/vasp_calculations/<material>/` | Same — always on HOME |
+| Intermediate dirs (`scf/`, `hf/`, `raman/`) | `$HOME/vasp_calculations/<material>/` | `$SCRATCH/vasp_calculations/<material>/` — **not on HOME** |
+| Unified workflow log (`workflow.log`) | `$MATERIAL_DIR/workflow.log` on HOME | `$SCRATCH/vasp_calculations/<material>/workflow.log` — on scratch for fast I/O |
 | Final `output/` | `$HOME/vasp_calculations/<material>/output/` | Copied from SCRATCH → HOME on completion |
 | Sync at start | N/A | `input/` + `workflow_settings.yaml` copied from HOME → SCRATCH |
 | Cleanup on `--restart` | Removes `scf/`, `hf/`, `raman/`, `output/` from HOME | Removes from SCRATCH + also cleans `output/` on HOME |
@@ -213,7 +213,7 @@ The `--scratch` flag redirects VASP output to `$SCRATCH` (NERSC's fast scratch f
 
 ### Crash recovery
 
-- `workflow_status.txt` stays on HOME — always visible for `--resume` even if SCRATCH is purged
+- `workflow.log` lives on SCRATCH under `--scratch` for faster I/O; the `STATUS_FILE` env var can override to HOME if needed
 - VASP output stays on SCRATCH — same as without the flag
 - If `$SCRATCH` is purged (90-day retention on NERSC), the sync re-creates `input/` at pipeline start. Use `--restart` to re-run VASP steps.
 - `$SCRATCH` is a shared Lustre filesystem at NERSC — visible from all login/compute nodes.
@@ -256,29 +256,34 @@ bash raman_workflow/run_gga_batch.sh --cpu --scratch  # CPU + scratch
 
 ## Checking progress without reattaching
 
-From **any** login node, check the status file:
+From **any** login node, check the unified workflow log:
 
 ```bash
-cat $RAMAN_PROJECT_DIR/<material_name>/workflow_status.txt
+tail -50 $RAMAN_PROJECT_DIR/<material_name>/workflow.log
+```
+
+Under `--scratch`:
+
+```bash
+tail -50 $SCRATCH/vasp_calculations/<material_name>/workflow.log
 ```
 
 Example:
 
 ```bash
-cat $RAMAN_PROJECT_DIR/hBN_LDA/workflow_status.txt
+tail -50 $RAMAN_PROJECT_DIR/hBN_LDA/workflow.log
 ```
 
-This works regardless of which login node you're on. The status file shows:
-- Which step is currently running
-- Which steps completed (with timestamps)
-- How long each step took
-- Which steps remain
+This works regardless of which login node you're on. The workflow log shows:
+- A box-drawn status table with step-by-step progress (icons: ✓ completed, ▶ running, ✗ failed)
+- Chronological log output from all pipeline steps
+- Timestamps and durations for each step
 
 ---
 
 ## Resume from last completed step
 
-If the pipeline fails partway through (e.g., due to a transient error), re-run the **same command** — the script auto-detects `workflow_status.txt` and resumes from the failed step:
+If the pipeline fails partway through (e.g., due to a transient error), re-run the **same command** — the script auto-detects `workflow.log` and resumes from the failed step:
 
 ```bash
 bash raman_workflow/run_raman_pipeline_interactive.sh hBN_LDA
@@ -298,11 +303,11 @@ What `--restart` removes:
 
 | Item | Pipeline Step | Default (HOME) | With `--scratch` |
 |------|--------------|----------------|-------------------|
-| `scf/` | ALL Step 3 output + intermediates | `$MATERIAL_DIR/scf/` | `$SCRATCH/vasp_work/<material>/scf/` |
-| `hf/` | Steps 4–10 supercell relax + phonopy + force constants | `$MATERIAL_DIR/hf/` | `$SCRATCH/vasp_work/<material>/hf/` |
-| `raman/` | Steps 11–20 Raman displacements + spectra | `$MATERIAL_DIR/raman/` | `$SCRATCH/vasp_work/<material>/raman/` |
-| `output/` | Aggregated results (plots, summaries) | `$MATERIAL_DIR/output/` | `$SCRATCH/vasp_work/<material>/output/` + also cleans `output/` on HOME |
-| `workflow_status.txt` | Resume checkpoint | `$MATERIAL_DIR/workflow_status.txt` | Same — always on HOME |
+| `scf/` | ALL Step 3 output + intermediates | `$MATERIAL_DIR/scf/` | `$SCRATCH/vasp_calculations/<material>/scf/` |
+| `hf/` | Steps 4–10 supercell relax + phonopy + force constants | `$MATERIAL_DIR/hf/` | `$SCRATCH/vasp_calculations/<material>/hf/` |
+| `raman/` | Steps 11–20 Raman displacements + spectra | `$MATERIAL_DIR/raman/` | `$SCRATCH/vasp_calculations/<material>/raman/` |
+| `output/` | Aggregated results (plots, summaries) | `$MATERIAL_DIR/output/` | `$SCRATCH/vasp_calculations/<material>/output/` + also cleans `output/` on HOME |
+| `workflow.log` | Unified status/log (resume checkpoint) | `$MATERIAL_DIR/workflow.log` | `$SCRATCH/vasp_calculations/<material>/workflow.log` |
 
 What `--restart` **preserves**:
 - `input/` directory (POSCAR, INCARs, POTCAR, KPOINTS) — `symmetry.conf` is auto-generated by the pipeline
@@ -335,7 +340,7 @@ Monitor with:
 
 ```bash
 squeue -u $USER
-cat $RAMAN_PROJECT_DIR/hBN_LDA/workflow_status.txt
+tail -50 $RAMAN_PROJECT_DIR/hBN_LDA/workflow.log
 ```
 
 ---

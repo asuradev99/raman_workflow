@@ -298,8 +298,19 @@ Table of mode number, frequency (cm⁻¹), and irreducible representation.
 ## Workflow Status
 EOFEOF
 
-if [ -f "${MATERIAL_DIR}/workflow_status.txt" ]; then
-    cat "${MATERIAL_DIR}/workflow_status.txt" >> "${OUTPUT_DIR}/README.md"
+# Append the most recent status block from the unified workflow log
+# (search for last occurrence of the box-drawn RAMAN WORKFLOW header)
+_WF_LOG="${MATERIAL_DIR}/workflow.log"
+if [ ! -f "$_WF_LOG" ]; then
+    _WF_LOG="${SCRATCH}/vasp_calculations/${MATERIAL_NAME}/workflow.log" 2>/dev/null || true
+fi
+if [ -f "$_WF_LOG" ]; then
+    echo "" >> "${OUTPUT_DIR}/README.md"
+    # Extract lines from the last "RAMAN WORKFLOW" header to end of file,
+    # stopping at the next "RAMAN WORKFLOW" or end of file.
+    sed -n '/RAMAN WORKFLOW/h; /RAMAN WORKFLOW/!H; ${x;p;}' "$_WF_LOG" \
+        | head -60 >> "${OUTPUT_DIR}/README.md" 2>/dev/null || true
+    echo "" >> "${OUTPUT_DIR}/README.md"
 fi
 
 echo ""

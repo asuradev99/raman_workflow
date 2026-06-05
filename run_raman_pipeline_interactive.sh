@@ -37,9 +37,11 @@
 #    - Reconnect later:  tmux attach -t raman
 #
 #  Status tracking:
-#    A file named workflow_status.txt is written to $MATERIAL_DIR
-#    after each step completes. Monitor with:
-#      watch -n 30 cat $MATERIAL_DIR/workflow_status.txt
+#    The Python pipeline writes a combined status/log file (workflow.log)
+#    using a box-drawn table format. Under --scratch it lives on $SCRATCH.
+#    Monitor with:
+#      tail -f $MATERIAL_DIR/workflow.log           # HOME (no --scratch)
+#      tail -f $SCRATCH/vasp_calculations/<mat>/workflow.log  # --scratch
 # =============================================================================
 
 set -euo pipefail
@@ -168,14 +170,14 @@ else
 fi
 
 MATERIAL_DIR="$RAMAN_PROJECT_DIR/$MATERIAL_NAME"
-STATUS_FILE="$MATERIAL_DIR/workflow_status.txt"
+STATUS_FILE="$MATERIAL_DIR/workflow.log"
 
 echo "  Project Dir:      $RAMAN_PROJECT_DIR"
 echo "  Material Dir:     $MATERIAL_DIR"
 echo "  Binary Utils:     $BINARY_UTILITIES_DIR"
 echo "  VASP Binary:      $VASP_BINARY"
 echo "  Mode:             ${MODE_STR}"
-echo "  Status File:      $STATUS_FILE"
+echo "  Status File:      $STATUS_FILE (HOME; scratch path when --scratch)"
 
 # Validate material directory
 if [ ! -d "$MATERIAL_DIR" ]; then
@@ -183,51 +185,16 @@ if [ ! -d "$MATERIAL_DIR" ]; then
     exit 1
 fi
 
-# ── Initialize Status File ────────────────────────────────────────────────
-echo ""
-echo "[2/5] Initializing status file..."
-START_TIME="$(date -u +%Y-%m-%d_%H:%M:%S_UTC)"
-# IMPORTANT: Only create the status file if it does not already exist.
-# If it exists from a previous run, the Python resume logic reads it
-# to determine which steps to skip.
-if [ ! -f "$STATUS_FILE" ]; then
-    cat > "$STATUS_FILE" << EOF
-================================================================================
-  RAMAN WORKFLOW STATUS  (Interactive Mode, ${MODE_STR})
-================================================================================
-  Material:         $MATERIAL_LABEL  ($MATERIAL_NAME)
-  Project Dir:      $RAMAN_PROJECT_DIR
-  Job ID:           $SLURM_JOB_ID
-  Node:             $(hostname)
-  Mode:             Interactive (salloc, ${MODE_STR})
-  Started:          $START_TIME
-  Overall Status:   INITIALIZING
-
-  (Detailed step tracking will appear as the pipeline progresses.)
-================================================================================
-EOF
-fi
-
-# Trap to append final status on exit
+# NOTE: Status/log management is handled entirely by the Python pipeline
+# (write_status() + Tee). No shell-level status file is created here.
+# The cleanup trap only prints to stdout for the terminal log.
 cleanup() {
     local exit_code=$?
-    local end_time="$(date -u +%Y-%m-%d_%H:%M:%S_UTC)"
+    echo ""
     if [ $exit_code -ne 0 ]; then
-        cat >> "$STATUS_FILE" << EOF
-
-================================================================================
-  ERROR — Pipeline failed with exit code $exit_code
-  Time: $end_time
-================================================================================
-EOF
+        echo "=== Pipeline failed with exit code $exit_code ==="
     else
-        cat >> "$STATUS_FILE" << EOF
-
-================================================================================
-  PIPELINE COMPLETED SUCCESSFULLY
-  Time: $end_time
-================================================================================
-EOF
+        echo "=== Pipeline completed successfully ==="
     fi
 }
 trap cleanup EXIT
