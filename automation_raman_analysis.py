@@ -1,16 +1,22 @@
 import argparse
 import os
 import glob
+import subprocess
 import sys
+import time
 from util import (Tee, run_command, fmt_time, calc_duration, ensure_dim_in_conf,
                   check_no_selective_dynamics,
-                  is_vasprun_valid, merge_config,
+                  is_calculation_complete, merge_config,
                   parse_resume_step, load_config, build_srun_args,
                   write_eigenvectors_conf, update_wavecar_symlinks,
                   update_chgcar_symlinks, check_vasp_convergence,
+                  check_dielectric_complete,
                   make_pipeline_excepthook, write_kpoints, write_incar,
                   count_ionic_steps,
-                  generate_kopia_script, inject_ramfile_energies)
+                  generate_kopia_script, inject_ramfile_energies,
+                  run_relaxation_with_zbrent_retry,
+                  print_step_header, print_step_result,
+                  split_srun_args)
 from util import make_write_status, STEP_HISTORY, STEP_DESCRIPTIONS
 import shutil
 
@@ -45,23 +51,30 @@ if CWD_BASENAME not in os.listdir(BASE_PROJECT_DIR):
     sys.exit(1)
 MATERIAL_DIR = os.path.join(BASE_PROJECT_DIR, CWD_BASENAME)
 
-# Preliminary WORK_DIR (refined after config load below)
+# ── Preliminary WORK_DIR (refined after config load below) ──────────────────
+SCRATCH_BASE = os.environ.get("SCRATCH", "")
 if SCRATCH_FLAG:
-    SCRATCH_BASE = os.environ.get("SCRATCH", "")
     if not SCRATCH_BASE:
         print("Error: --scratch flag requires $SCRATCH environment variable.")
         sys.exit(1)
     WORK_DIR = os.path.join(SCRATCH_BASE, "vasp_calculations", CWD_BASENAME)
 else:
     WORK_DIR = MATERIAL_DIR
-# HFFILES_DIR / RAMAN_DIR — assigned after config load (see line ~144)
+
+# HFFILES_DIR / RAMAN_DIR — assigned after config load
 HFFILES_DIR = None
 RAMAN_DIR = None
-# Preliminary status/log path (used by --restart cleanup below; refined after config load)
-if SCRATCH_FLAG:
-    STATUS_FILE = os.environ.get("STATUS_FILE", os.path.join(WORK_DIR, "workflow.log"))
-else:
-    STATUS_FILE = os.environ.get("STATUS_FILE", os.path.join(MATERIAL_DIR, "workflow.log"))
+
+# workflow.log ALWAYS lives on HOME — it's tiny text, and keeping it on HOME:
+#  - survives SCRATCH purges (90-day NERSC retention)
+#  - is visible to monitoring scripts (show_status.sh, tail)
+#  - makes config-staleness checks meaningful (same filesystem as configs)
+STATUS_FILE = os.path.join(MATERIAL_DIR, "workflow.log")
+OUTPUT_FILE = os.path.join(MATERIAL_DIR, "workflow.out")
+
+# Redirect ALL output early so workflow.out captures everything printed
+# (config loading, --restart messages, scratch setup, etc.).
+sys.stdout = Tee(STATUS_FILE, OUTPUT_FILE)
 
 # ── --restart: delete all generated directories, keep input/ + config ────────
 if RESTART_FLAG:
@@ -70,22 +83,21 @@ if RESTART_FLAG:
     print("  --restart flag detected: Deleting all generated output...")
     print(f"{sep}\n")
 
-    clean_base = WORK_DIR if SCRATCH_FLAG else MATERIAL_DIR
-
+    # Clean generated dirs from WORK_DIR (SCRATCH or HOME)
     for dirname in ("scf", "hf", "raman", "output"):
-        dp = os.path.join(clean_base, dirname)
-        if os.path.exists(dp):
+        dp = os.path.join(WORK_DIR, dirname)
+        if os.path.exists(dp) and not os.path.islink(dp):
             shutil.rmtree(dp)
             print(f"  Removed: {dp}/")
 
-    # With --scratch, also clean HOME/output/
+    # --scratch: also clean HOME/output/ (final copy destination)
     if SCRATCH_FLAG:
         home_output = os.path.join(MATERIAL_DIR, "output")
-        if os.path.exists(home_output):
+        if os.path.exists(home_output) and not os.path.islink(home_output):
             shutil.rmtree(home_output)
             print(f"  Removed HOME output/: {home_output}")
 
-    # Remove combined workflow log (on scratch under --scratch, HOME otherwise)
+    # Remove workflow.log from HOME (always there now)
     if os.path.exists(STATUS_FILE):
         os.remove(STATUS_FILE)
         print(f"  Removed: {STATUS_FILE}")
@@ -142,28 +154,43 @@ MATERIAL_LABEL = CONFIG.get("material") or MATERIAL_NAME
 MATERIAL_DIR = os.path.join(BASE_PROJECT_DIR, MATERIAL_NAME)
 # Finalize WORK_DIR (--scratch: VASP on $SCRATCH, config on $HOME)
 #
-# Under --scratch, intermediate dirs (scf/, hf/, raman/) live exclusively on
-# $SCRATCH — HOME only contains input/ and output/.  The combined status/log
-# file (workflow.log) is also on scratch for faster I/O.
+# Under --scratch:
+#  - input/ is a symlink → $MATERIAL_DIR/input  (read-only, no copy needed)
+#  - scf/, hf/, raman/, output/ live on $SCRATCH for fast VASP I/O
+#  - workflow.log is ALWAYS on HOME (tiny text, survives SCRATCH purges)
+#  - output/ is copied HOME at pipeline end (the important final results)
 if SCRATCH_FLAG:
-    WORK_DIR = os.path.join(os.environ["SCRATCH"], "vasp_calculations", MATERIAL_NAME)
+    WORK_DIR = os.path.join(SCRATCH_BASE, "vasp_calculations", MATERIAL_NAME)
     HFFILES_DIR = os.path.join(WORK_DIR, "hf")
     RAMAN_DIR = os.path.join(WORK_DIR, "raman")
-    STATUS_FILE = os.environ.get("STATUS_FILE", os.path.join(WORK_DIR, "workflow.log"))
     print(f"  [scratch] WORK_DIR = {WORK_DIR}")
-    print(f"  [scratch] Status/log: {STATUS_FILE}")
+    print(f"  [scratch] input/ will be symlinked from HOME (not copied)")
 else:
     WORK_DIR = MATERIAL_DIR
     HFFILES_DIR = os.path.join(MATERIAL_DIR, "hf")
     RAMAN_DIR = os.path.join(MATERIAL_DIR, "raman")
-    STATUS_FILE = os.environ.get("STATUS_FILE", os.path.join(MATERIAL_DIR, "workflow.log"))
-# Install exception hook now that STATUS_FILE is finalised
+
+# STATUS_FILE always on HOME — see comment at preliminary assignment above
 sys.excepthook = make_pipeline_excepthook(STATUS_FILE)
 
-# Redirect all print() output to the combined workflow log (which also serves
-# as the status file — write_status() appends formatted update blocks to it).
-sys.stdout = Tee(STATUS_FILE)
-print(f"  [log] Workflow log: {STATUS_FILE}")
+# ── Job start header ──────────────────────────────────────────────────────────
+_now = time.strftime("%Y-%m-%d %H:%M:%S %Z")
+_cmd = " ".join(sys.argv)
+_node = os.uname().nodename
+_sep = "\u2550" * 78
+print(f"\n{_sep}")
+print(f"  RAMAN PIPELINE START")
+print(f"{_sep}")
+print(f"  Date      : {_now}")
+print(f"  Host      : {_node}")
+print(f"  Material  : {MATERIAL_LABEL}  ({MATERIAL_NAME})")
+print(f"  Work dir  : {WORK_DIR}")
+print(f"  Log file  : {STATUS_FILE}")
+print(f"  Flags     : scratch={'on' if SCRATCH_FLAG else 'off'}  "
+      f"restart={'on' if RESTART_FLAG else 'off'}  "
+      f"cpu={'on' if CPU_FLAG else 'off'}")
+print(f"  Command   : python {_cmd}")
+print(f"{_sep}\n")
 
 if MATERIAL_NAME != CWD_BASENAME:
     print(f"  [config] Config 'name' differs from CWD: '{MATERIAL_NAME}' vs '{CWD_BASENAME}'")
@@ -188,6 +215,7 @@ RAMAN_SCATTERED_POL = CONFIG["raman_tensor"]["scattered_polarization"]
 RAMAN_SURFACE_NORMAL = CONFIG["raman_tensor"]["surface_normal"]
 
 VASP_MAX_RESTARTS = CONFIG["vasp_loop"]["max_restarts"]
+HF_PARALLEL = CONFIG.get("hf_parallel", False)
 
 SCF_KPOINTS_MESH = CONFIG["scf_kpoints"]["mesh"]
 SCF_KPOINTS_SHIFT = CONFIG["scf_kpoints"]["shift"]
@@ -246,9 +274,45 @@ def vasp_loop_check_and_restart(vasp_script_path, max_restarts=3):
                     f"srun {SRUN_ARGS} {VASP_BINARY_PATH} > stdout",
                     cwd=dpath,
                 )
+        elif HF_PARALLEL:
+            print(f"  [gpu:hf_parallel] Running {len(all_hf)} directories "
+                  f"in parallel...")
+            split_args = split_srun_args(SRUN_ARGS, len(all_hf))
+            if not split_args:
+                print("  [gpu:hf_parallel] split_srun_args failed "
+                      "— falling back to serial")
+                run_command(
+                    f"export SRUN_ARGS='{SRUN_ARGS}' && "
+                    f"bash {vasp_script_path}",
+                    cwd=HFFILES_DIR,
+                )
+            else:
+                procs = []
+                for d, sargs in zip(all_hf, split_args):
+                    dpath = os.path.join(HFFILES_DIR, d)
+                    cmd = f"srun --overlap {sargs} {VASP_BINARY_PATH} > stdout"
+                    print(f"    [{d}] srun --overlap {sargs} {VASP_BINARY_PATH}")
+                    procs.append(subprocess.Popen(
+                        cmd, shell=True, cwd=dpath))
+                failed = []
+                for d, p in zip(all_hf, procs):
+                    rc = p.wait()
+                    if rc != 0:
+                        failed.append(d)
+                        print(f"    [{d}] ERROR: VASP exited with code {rc}")
+                if failed:
+                    print(f"  [gpu:hf_parallel] {len(failed)}/{len(all_hf)} "
+                          f"directories FAILED: {', '.join(failed)}")
+                else:
+                    print(f"  [gpu:hf_parallel] All {len(all_hf)} directories "
+                          f"completed successfully.")
         else:
-            print(f"  [gpu] Running automate_hfiles.sh (GPU mode)...")
-            run_command(vasp_script_path, cwd=HFFILES_DIR)
+            print(f"  [gpu] Running automate_hfiles_fixed.sh (GPU mode)...")
+            print(f"  [gpu] srun args: {SRUN_ARGS}")
+            run_command(
+                f"export SRUN_ARGS='{SRUN_ARGS}' && bash {vasp_script_path}",
+                cwd=HFFILES_DIR,
+            )
 
         # Validate ALL displacement runs (not just first)
         hf_dirs = sorted(
@@ -262,7 +326,7 @@ def vasp_loop_check_and_restart(vasp_script_path, max_restarts=3):
 
         failed_dirs = [
             d for d in hf_dirs
-            if not is_vasprun_valid(os.path.join(HFFILES_DIR, d, "vasprun.xml"))
+            if not is_calculation_complete(os.path.join(HFFILES_DIR, d))
         ]
         if not failed_dirs:
             print(f"VASP runs completed in all {len(hf_dirs)} displacement directories.")
@@ -289,14 +353,48 @@ if START_STEP is None:
 
 print(f"[resume] START_STEP = {START_STEP} — starting pipeline execution.")
 
-# ── --scratch: sync input/ + config to SCRATCH ──────────────────────────────
+# ── Config staleness warning ─────────────────────────────────────────────────
+# Warn if either shared or per-material config was modified after the last run.
+if START_STEP > 3 and os.path.exists(STATUS_FILE):
+    log_mtime = os.path.getmtime(STATUS_FILE)
+    for cfg_path, cfg_label in [(SHARED_CONFIG_PATH, "shared"),
+                                  (CONFIG_PATH, "per-material")]:
+        if os.path.exists(cfg_path):
+            if os.path.getmtime(cfg_path) > log_mtime:
+                print(f"WARNING: {cfg_label} config ({os.path.basename(cfg_path)}) "
+                      f"was modified after the last pipeline run.")
+                print(f"         Verify settings are consistent with completed steps, or use --restart.")
+
+# ── --scratch: symlink input/ from HOME → SCRATCH ───────────────────────────
 if SCRATCH_FLAG:
-    print(f"\n  [scratch] Syncing input/ from HOME to SCRATCH...")
+    print(f"\n  [scratch] Linking input/ from HOME to SCRATCH...")
     print(f"  [scratch] Source: {MATERIAL_DIR}/input")
-    print(f"  [scratch] Target: {WORK_DIR}")
+    print(f"  [scratch] Target: {WORK_DIR}/input (symlink)")
     run_command(f"mkdir -p {WORK_DIR}", cwd=MATERIAL_DIR)
-    run_command(f"cp -r input {WORK_DIR}/", cwd=MATERIAL_DIR)
-    print(f"  [scratch] Sync complete. VASP stages will run in: {WORK_DIR}")
+
+    # Remove stale symlink or directory if it exists (from previous run or old copy)
+    scratch_input = os.path.join(WORK_DIR, "input")
+    if os.path.islink(scratch_input):
+        os.unlink(scratch_input)
+    elif os.path.isdir(scratch_input):
+        shutil.rmtree(scratch_input)
+
+    os.symlink(os.path.join(MATERIAL_DIR, "input"), scratch_input)
+    print(f"  [scratch] Symlink created. VASP stages will run in: {WORK_DIR}")
+
+    # Guard: warn if any intermediate dirs exist on HOME (stale from old runs)
+    # Under --scratch, scf/, hf/, and raman/ should only exist on $SCRATCH.
+    stale_on_home = []
+    for d in ("scf", "hf", "raman"):
+        dp = os.path.join(MATERIAL_DIR, d)
+        if os.path.exists(dp) and not os.path.islink(dp):
+            stale_on_home.append(d)
+    if stale_on_home:
+        print(f"  [scratch] WARNING: Stale intermediate directories found on HOME:")
+        for d in stale_on_home:
+            print(f"  [scratch]   {MATERIAL_DIR}/{d}/")
+        print(f"  [scratch] These are NOT used by the pipeline (all VASP I/O is on $SCRATCH).")
+        print(f"  [scratch] Remove with: rm -rf {' '.join(os.path.join(MATERIAL_DIR, d) for d in stale_on_home)}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  WORKFLOW STEPS
@@ -304,13 +402,14 @@ if SCRATCH_FLAG:
 
 # ── Step 3: VASP relaxation ──────────────────────────────────────────────────
 if START_STEP <= 3:
+    print_step_header(3)
     write_status(3, "running", "Initial VASP relaxation")
+    _t0 = time.time()
 
     # VASP runs in scf/; no INCAR swap needed — downstream steps generate fresh
     scf_dir = os.path.join(WORK_DIR, "scf")
     run_command(f"mkdir -p {scf_dir}", cwd=WORK_DIR)
 
-    print("\n--- Step 3: Initial VASP relaxation ---")
     input_dir = os.path.join(MATERIAL_DIR, "input")
     # Validate and copy POSCAR + POTCAR from input/ (KPOINTS generated from config below)
     for vasp_input in ("POSCAR", "POTCAR"):
@@ -324,36 +423,41 @@ if START_STEP <= 3:
     write_kpoints(os.path.join(scf_dir, "KPOINTS"),
                   "K-points for unit cell SCF", SCF_KPOINTS_MESH, SCF_KPOINTS_SHIFT)
     print(f"  [setup] Wrote unit cell KPOINTS ({SCF_KPOINTS_MESH}) to scf/")
-    write_incar(os.path.join(WORK_DIR, "scf", "INCAR"), CONFIG, "relax", CPU_FLAG)
+    write_incar(os.path.join(WORK_DIR, "scf", "INCAR"), CONFIG, "relax")
     # Check POTCAR exists before running VASP
     if not os.path.exists(os.path.join(scf_dir, "POTCAR")):
         raise FileNotFoundError(
             f"POTCAR not found in {scf_dir}. Cannot run VASP without a pseudopotential."
         )
-    run_command(f"srun {SRUN_ARGS} {VASP_BINARY_PATH} > relaxation.stdout",
-                cwd=scf_dir, check_success=False)
-    check_vasp_convergence(scf_dir, "step-3")
+    if not run_relaxation_with_zbrent_retry(
+        scf_dir, SRUN_ARGS, VASP_BINARY_PATH,
+        stage_label="step-3",
+    ):
+        msg = (f"VASP relaxation failed after max retries in {scf_dir}. "
+               f"Check {scf_dir}/relaxation.stdout for details.")
+        print_step_result(3, ok=False, duration_s=time.time() - _t0, message="Relaxation failed")
+        raise RuntimeError(msg)
     write_status(3, "completed", "Initial VASP relaxation finished")
+    print_step_result(3, ok=True, duration_s=time.time() - _t0)
 
 
-# ── Step 4: Generate supercell + quick electronic convergence check ──────────
-# Step 4b/4c (full supercell ionic relaxation with NSW=200) were intentionally
-# removed: the supercell generated from the relaxed unit cell (Step 3) should
-# be near equilibrium, so a short electronic SCF check suffices.
-# NELM=10 in the static template limits electronic SCF iterations; if the
-# supercell electronic structure is incompatible, VASP errors out quickly.
+# ── Step 4: Generate supercell + ionic relaxation ────────────────────────────
+# The supercell generated from the relaxed unit cell (Step 3) should be near
+# equilibrium.  This step runs a single VASP ionic relaxation (NSW=100, ISIF=3
+# with LATTICE_CONSTRAINTS fixing z) to verify the supercell is in a stable
+# state and to produce CHGCAR + WAVECAR for seeding downstream force-constant
+# calculations.
 if START_STEP <= 4:
-    write_status(4, "running", "Supercell generation + electronic convergence check")
+    print_step_header(4)
+    write_status(4, "running", "Supercell generation + ionic relaxation")
+    _t0 = time.time()
 
-    print("\n--- Step 4: Generate supercell + quick electronic convergence check ---")
     groundstate_dir = os.path.join(HFFILES_DIR, "groundstate")
     run_command(f"mkdir -p {groundstate_dir}", cwd=WORK_DIR)
 
     # 4a. Generate supercell from relaxed unit cell (in hf/ — shared with Step 6)
     print("  [setup] Creating supercell in hf/ via phonopy (shared with force-constant step)...")
     run_command(f"cp scf/CONTCAR {HFFILES_DIR}/POSCAR_unitcell", cwd=WORK_DIR)
-    # Guard: POSCAR_unitcell must not contain Selective Dynamics — CONTCAR never carries it,
-    # but if it somehow did, phonopy displacements would be silently wrong.
     check_no_selective_dynamics(
         os.path.join(HFFILES_DIR, "POSCAR_unitcell"),
         "POSCAR_unitcell — source for all phonopy supercell displacements"
@@ -373,61 +477,64 @@ if START_STEP <= 4:
     run_command(f"cp SPOSCAR {groundstate_dir}/POSCAR", cwd=HFFILES_DIR)
     print("  [setup] POSCAR-* displacement files + SPOSCAR now in hf/ — Step 6 will reuse them")
 
-    # 4d. Quick electronic SCF convergence check on the perfect supercell
-    # Uses the static template (NSW=0, NELM=100, LCHARG=TRUE, LWAVE=TRUE).
-    # Ions are fixed — only electronic SCF iterations count.
-    print("  [setup] Setting up quick electronic SCF convergence check on the SPOSCAR supercell...")
-    write_incar(os.path.join(groundstate_dir, "INCAR"), CONFIG, "static", CPU_FLAG)
+    # 4b. Set up + run supercell ionic relaxation (NSW=100, ISIF=3, 2D-constrained)
+    print("  [vasp] Setting up supercell ionic relaxation (NSW=100, ISIF=3, 2D-constrained)...")
+    write_incar(os.path.join(groundstate_dir, "INCAR"), CONFIG, "supercell_relax")
     write_kpoints(os.path.join(groundstate_dir, "KPOINTS"),
-                  "K-points for supercell electronic convergence check",
+                  "K-points for supercell ionic relaxation",
                   SUP_RELAX_KPOINTS_MESH, SUP_RELAX_KPOINTS_SHIFT)
     print(f"  [setup] Wrote supercell KPOINTS ({SUP_RELAX_KPOINTS_MESH}) to hf/groundstate/")
     run_command(f"cp input/POTCAR {groundstate_dir}/", cwd=WORK_DIR)
 
-    # 4d-ii. Run VASP — NSW=0 (fixed ions), NELM=100 enables full SCF convergence
-    print("  [vasp] Running electronic SCF convergence check on supercell (NSW=0, NELM=100)...")
-    print(f"  [vasp] Verifying the supercell ({PHONOPY_DIM}) generated from "
-          f"the relaxed unit cell is electronically compatible.")
+    print("  [vasp] Running supercell ionic relaxation...")
+    # check_success=False: ZBRENT crashes are expected when near convergence
     run_command(
-        f"srun {SRUN_ARGS} {VASP_BINARY_PATH} > static.stdout",
+        f"srun {SRUN_ARGS} {VASP_BINARY_PATH} > supercell_relax.stdout",
         cwd=groundstate_dir,
+        check_success=False,
     )
-    check_vasp_convergence(groundstate_dir, "step-4d")
+    check_vasp_convergence(groundstate_dir, "step-4")
 
-    # 4d-iii. Count electronic SCF iterations — warn if >3
-    # (count_ionic_steps() counts Iteration N(M) lines in OUTCAR, which
-    #  are the electronic SCF iterations. With NSW=0 there's only one
-    #  ionic step, so the total is the number of SCF iterations.)
-    n_elec_steps = count_ionic_steps(groundstate_dir)
-    if n_elec_steps:
-        print(f"  [info] Supercell SCF converged in {n_elec_steps} electronic iteration(s)")
-        if n_elec_steps > 3:
-            print(f"  WARNING: SCF needed {n_elec_steps} electronic iterations to converge "
-                  f"(expected <=3 for a compatible supercell). The structure generated "
-                  f"from the relaxed unit cell may not be electronically stable.")
-    else:
-        print(f"  WARNING: OUTCAR not found in {groundstate_dir} — cannot count SCF iterations")
+    # Count completed ionic steps and warn if supercell hit NSW limit
+    n_ionic = count_ionic_steps(groundstate_dir)
+    if n_ionic:
+        print(f"  [info] Supercell ionic relaxation: {n_ionic} step(s) completed (max NSW=100)")
+        if n_ionic >= 100:
+            print(f"")
+            print(f"  ╔{'═'*60}╗")
+            print(f"  ║  WARNING: Supercell relaxation reached NSW=100 limit     ║")
+            print(f"  ║  The supercell may not be at equilibrium.               ║")
+            print(f"  ║  Check per-atom forces above vs EDIFFG threshold.       ║")
+            print(f"  ║  Consider: larger NSW, or review Step 3 relaxation.     ║")
+            print(f"  ╚{'═'*60}╝")
+            print(f"")
 
-    # 4e. Copy CONTCAR to hf/ for reference + phonopy_visualization
-    # phonopy_visualization (Step 10b) reads a file named "CONTCAR" in hf/
-    # CONTCAR_supercell_relaxed is a human-readable reference copy.
-    run_command(f"cp CONTCAR {HFFILES_DIR}/CONTCAR_supercell_relaxed", cwd=groundstate_dir)
-    run_command(f"cp CONTCAR {HFFILES_DIR}/CONTCAR", cwd=groundstate_dir)
+    # 4c. Use SPOSCAR (exact tiling) as reference structure for downstream.
+    # The ISIF=2 relaxation produced CHGCAR + WAVECAR in groundstate/ for
+    # seeding, but the reference structure is the phonopy tiling of the
+    # relaxed unit cell — NOT the relaxed supercell (cell params are
+    # k-point-converged from Step 3; re-relaxing at coarse k-mesh would
+    # degrade them).
+    run_command(f"cp SPOSCAR {HFFILES_DIR}/CONTCAR_supercell_relaxed", cwd=HFFILES_DIR)
+    run_command(f"cp SPOSCAR {HFFILES_DIR}/CONTCAR", cwd=HFFILES_DIR)
+    # Also keep the actual relaxed CONTCAR in groundstate/ for reference
+    run_command(f"cp CONTCAR {groundstate_dir}/CONTCAR_relaxed", cwd=groundstate_dir, check_success=False)
 
-    print("  [done] Step 4 complete — CHGCAR + WAVECAR in hf/groundstate/ ready for force-constant seeding.")
-    write_status(4, "completed", "Supercell electronic check done — "
+    write_status(4, "completed", "Supercell relaxed — "
                  "CHGCAR/WAVECAR in hf/groundstate/")
+    print_step_result(4, ok=True, duration_s=time.time() - _t0)
 
 
 # ── Step 5: Copy files to hf/ ───────────────────────────────────────────────
 if START_STEP <= 5:
+    print_step_header(5)
     write_status(5, "running", "Copy files to hf/")
-    print("\n--- Step 5: Copy POTCAR + KPOINTS + INCAR to hf/ ---")
+    _t0 = time.time()
     run_command(f"mkdir -p {HFFILES_DIR}", cwd=WORK_DIR)
     # POSCAR_unitcell = relaxed unit cell (primitive) for phonopy displacement generation
     run_command(f"cp scf/CONTCAR {HFFILES_DIR}/POSCAR_unitcell", cwd=WORK_DIR)
     # Force-constant INCAR (NSW=0, no LOPTICS) from YAML: incar_templates.hf + incar_settings.hf
-    write_incar(os.path.join(HFFILES_DIR, "INCAR"), CONFIG, "hf", CPU_FLAG)
+    write_incar(os.path.join(HFFILES_DIR, "INCAR"), CONFIG, "hf")
     write_kpoints(os.path.join(HFFILES_DIR, "KPOINTS"),
                   "K-points for force-constant calculation (coarse mesh)",
                   HF_KPOINTS_MESH, HF_KPOINTS_SHIFT)
@@ -437,11 +544,13 @@ if START_STEP <= 5:
     # symmetry.conf for phonopy (DIM from config, IRREPS=0 0 0)
     ensure_dim_in_conf(os.path.join(HFFILES_DIR, "symmetry.conf"), "symmetry.conf", PHONOPY_DIM)
     write_status(5, "completed", "Files copied to hf/")
+    print_step_result(5, ok=True, duration_s=time.time() - _t0)
 
 # ── Step 6-7: Phonopy displacements + runHF ──────────────────────────────────
 if START_STEP <= 6:
+    print_step_header(6)
     write_status(6, "running", "Verify supercell displacements (from Step 4)")
-    print("\n--- Step 6: Verify supercell displacements (generated in Step 4) ---")
+    _t0 = time.time()
     # Displacement files (SPOSCAR + POSCAR-*) were already generated in hf/ by Step 4
     sposcar_path = os.path.join(HFFILES_DIR, "SPOSCAR")
     if not os.path.exists(sposcar_path):
@@ -451,10 +560,12 @@ if START_STEP <= 6:
         )
     print(f"  [verify] SPOSCAR found in hf/ — reusing supercell displacements from Step 4")
     write_status(6, "completed", "Displacements verified (from Step 4)")
+    print_step_result(6, ok=True, duration_s=time.time() - _t0)
 
 if START_STEP <= 7:
+    print_step_header(7)
     write_status(7, "running", "runHF folder organization")
-    print("\n--- Step 7: Run runHF to organize displacement folders ---")
+    _t0 = time.time()
     run_hf_script = os.path.join(BINARY_UTILITIES_DIR, "runHF")
     if not os.path.exists(run_hf_script):
         raise FileNotFoundError(
@@ -462,15 +573,14 @@ if START_STEP <= 7:
         )
     run_command(run_hf_script, cwd=HFFILES_DIR)
     write_status(7, "completed", "runHF folder organization done")
+    print_step_result(7, ok=True, duration_s=time.time() - _t0)
 
 # ── Step 8: Populate groundstate/ config + update displacement symlinks ────────
-# Step 4 ran the supercell static SCF directly in hf/groundstate/, producing
-# CHGCAR and WAVECAR there.  This step copies INCAR/KPOINTS/POSCAR for
-# record-keeping and updates the hf_POSCAR-* symlinks to point to groundstate/.
 if START_STEP <= 8:
+    print_step_header(8)
     write_status(8, "running", "Populate groundstate/ config + update displacement symlinks")
+    _t0 = time.time()
 
-    print("\n--- Step 8: Populate groundstate/ config + update displacement symlinks ---")
     groundstate_dir = os.path.join(HFFILES_DIR, "groundstate")
 
     # Ensure groundstate/ exists
@@ -478,33 +588,38 @@ if START_STEP <= 8:
         print("  groundstate/ not found — Step 4 may not have run; creating it")
         run_command(f"mkdir -p {groundstate_dir}", cwd=WORK_DIR)
 
-    # Copy INCAR, KPOINTS, POSCAR for record-keeping (the displacement VASP
-    # runs read their own from hf/ level, but groundstate/ serves as reference)
+    # Copy INCAR, KPOINTS, POSCAR for record-keeping
     run_command(f"cp INCAR {groundstate_dir}/", cwd=HFFILES_DIR)
     run_command(f"cp KPOINTS {groundstate_dir}/", cwd=HFFILES_DIR)
     run_command(f"cp POSCAR_unitcell {groundstate_dir}/POSCAR", cwd=HFFILES_DIR)
 
     # Replace dangling runHF symlinks with direct groundstate/WAVECAR links
     update_wavecar_symlinks(HFFILES_DIR)
-    # Create CHGCAR symlinks in displacement dirs (parallel to WAVECAR)
     update_chgcar_symlinks(HFFILES_DIR)
 
     write_status(8, "completed", "groundstate/ config populated — "
                  "displacement runs seeded from hf/groundstate/")
+    print_step_result(8, ok=True, duration_s=time.time() - _t0)
 
 # ── Step 9: VASP force constants ─────────────────────────────────────────────
 if START_STEP <= 9:
+    print_step_header(9)
     write_status(9, "running", "VASP in all hf_POSCAR folders (force constants)")
+    _t0 = time.time()
 
-    print("\n--- Step 9: Run VASP in all hf_POSCAR folders ---")
-    automate_script = os.path.join(BINARY_UTILITIES_DIR, "automate_hfiles.sh")
+    # ── Use local env-aware copy so SRUN_ARGS from config is respected ────
+    # The original at BINARY_UTILITIES_DIR/automate_hfiles.sh has hardcoded
+    # srun params. Our local copy reads $SRUN_ARGS from the environment.
+    automate_script = os.path.join(SCRIPT_DIR, "automate_hfiles_fixed.sh")
+    if not os.path.exists(automate_script):
+        # Fall back to the binary-utilities original (single-node only)
+        automate_script = os.path.join(BINARY_UTILITIES_DIR, "automate_hfiles.sh")
     if not os.path.exists(automate_script):
         raise FileNotFoundError(
-            f"automate_hfiles.sh not found at {automate_script}. "
-            f"Check BINARY_UTILITIES_DIR."
+            f"automate_hfiles_fixed.sh not found at {SCRIPT_DIR}/automate_hfiles_fixed.sh "
+            f"and automate_hfiles.sh not found at {BINARY_UTILITIES_DIR}/automate_hfiles.sh. "
+            f"Check SCRIPT_DIR and BINARY_UTILITIES_DIR."
         )
-    # Guard: SPOSCAR must not contain Selective Dynamics — force constants need
-    # full 3D displacements including out-of-plane (z) motion.
     check_no_selective_dynamics(
         os.path.join(HFFILES_DIR, "SPOSCAR"),
         "SPOSCAR — source for all force-constant displacement POSCAR files"
@@ -512,18 +627,20 @@ if START_STEP <= 9:
     vasp9_ok = vasp_loop_check_and_restart(automate_script, max_restarts=VASP_MAX_RESTARTS)
     if not vasp9_ok:
         write_status(9, "failed", "VASP force-constant runs did not complete — check hf_POSCAR-*/stdout files")
+        print_step_result(9, ok=False, duration_s=time.time() - _t0,
+                          message="Force-constant VASP runs incomplete")
         raise RuntimeError(
             f"Step 9 failed: VASP force-constant runs incomplete after {VASP_MAX_RESTARTS} attempts. "
             "Proceeding would cause phonopy to compute wrong force constants from partial data."
         )
     write_status(9, "completed", "VASP force-constant runs finished")
+    print_step_result(9, ok=True, duration_s=time.time() - _t0)
 
 # ── Step 10: Phonon postprocessing ───────────────────────────────────────────
 if START_STEP <= 10:
+    print_step_header(10)
     write_status(10, "running", "Phonon postprocessing")
-
-    # Replicates phonon_postprocessing (original had hardcoded inaccessible PATH)
-    print("\n--- Step 10: Phonon postprocessing (force constants + eigenvectors) ---")
+    _t0 = time.time()
 
     # PART A: phonon_force — Run "phonopy -f" on all hf_POSCAR-XXX/vasprun.xml files
     print("  [10a] Extracting force constants from VASP runs...")
@@ -592,17 +709,16 @@ if START_STEP <= 10:
     if not os.path.exists(os.path.join(HFFILES_DIR, "all_mode.txt")):
         print("WARNING: all_mode.txt was not created by phonon postprocessing.")
     write_status(10, "completed", "Phonon postprocessing done")
+    print_step_result(10, ok=True, duration_s=time.time() - _t0)
 
 # ── Step 11: Copy CONTCAR + VASP inputs to raman dir ─────────────────────────
 if START_STEP <= 11:
+    print_step_header(11)
     write_status(11, "running", "Copy CONTCAR to raman dir")
+    _t0 = time.time()
 
-    print("\n--- Step 11: Copy CONTCAR + INCAR + KPOINTS + POTCAR to Raman dir ---")
     run_command(f"mkdir -p {RAMAN_DIR}", cwd=WORK_DIR)
     run_command(f"cp scf/CONTCAR {RAMAN_DIR}/CONTCAR", cwd=WORK_DIR)
-    # Symlink CHGCAR and WAVECAR from scf/ for warm-starting the resonant Raman runs
-    # (Step 14 runs VASP in each RA_POSCAR-* with ISTART=1, ICHARG=1 — having these
-    #  files present reduces SCF iterations by ~2-3 per displaced structure.)
     for f in ("CHGCAR", "WAVECAR"):
         src = os.path.join(WORK_DIR, "scf", f)
         dst = os.path.join(RAMAN_DIR, f)
@@ -611,7 +727,7 @@ if START_STEP <= 11:
             print(f"  [setup] Symlinked {f} from scf/ → raman/")
         else:
             print(f"  [setup] WARNING: {f} not found in scf/ — RA_POSCAR-* runs will start cold")
-    write_incar(os.path.join(RAMAN_DIR, "INCAR"), CONFIG, "dielec", CPU_FLAG)
+    write_incar(os.path.join(RAMAN_DIR, "INCAR"), CONFIG, "dielec")
     write_kpoints(os.path.join(RAMAN_DIR, "KPOINTS"),
                   "K-points for resonant Raman calculation (dense mesh)",
                   RAMAN_KPOINTS_MESH, RAMAN_KPOINTS_SHIFT)
@@ -620,20 +736,22 @@ if START_STEP <= 11:
     print("  [setup] Copied CONTCAR + INCAR (from YAML config), POTCAR (from input/) to RAMAN_DIR.")
     print(f"  [setup] KPOINTS generated from config raman_kpoints.mesh={RAMAN_KPOINTS_MESH}.")
     write_status(11, "completed", "CONTCAR and INCAR copied to raman dir")
+    print_step_result(11, ok=True, duration_s=time.time() - _t0)
 
-# ── Step 12: chdir to RAMAN_DIR (always runs; status only if START_STEP <= 12) ─
+# ── Step 12: chdir to RAMAN_DIR ────────────────────────────────────────────
 if START_STEP <= 12:
     write_status(12, "completed", "Navigated to Raman dir")
 
-print("\n--- Step 12: Navigate to Raman dir ---")
+print_step_header(12)
 os.chdir(RAMAN_DIR)
-print(f"Current working directory: {os.getcwd()}")
+print(f"Working directory: {os.getcwd()}")
+print_step_result(12, ok=True, duration_s=0)
 
 # ── Step 13: Generate Raman displacements and organize ──────────────────────
 if START_STEP <= 13:
+    print_step_header(13)
     write_status(13, "running", "Generate Raman displacements and organize")
-
-    print("\n--- Step 13: Generate Raman displacements and organize ---")
+    _t0 = time.time()
 
     # Validate binary utilities exist before attempting to run them
     for bin_name in ("ramdiscar", "genRApos610", "runRA"):
@@ -674,90 +792,92 @@ if START_STEP <= 13:
         print(f"  [setup] No CHGCAR/WAVECAR to seed ({n_ra} ra_pos_* dirs found)")
 
     write_status(13, "completed", "Raman displacements generated and organized")
+    print_step_result(13, ok=True, duration_s=time.time() - _t0)
 
 # ── Step 14: Resonant VASP ───────────────────────────────────────────────────
 if START_STEP <= 14:
+    print_step_header(14)
     write_status(14, "running", "Resonant VASP runs in all ra_pos_* folders")
-    print("\n--- Step 14: Run resonant Raman calculations ---")
-    # Use local fixed copy (original has scancel on line 59)
+    _t0 = time.time()
+
     LOCAL_RUN_ALL_VASP = os.path.join(SCRIPT_DIR, "run_all_vasp_folders_fixed.sh")
     if not os.path.exists(LOCAL_RUN_ALL_VASP):
         raise FileNotFoundError(
             f"run_all_vasp_folders_fixed.sh not found at {LOCAL_RUN_ALL_VASP}. "
             f"This script is required for Step 14 resonant VASP runs."
         )
-    # Guard: spot-check the first ra_pos_* POSCAR — Raman displacement files are
-    # generated from scratch (not copied from input/POSCAR) so Selective Dynamics
-    # should never be present.
     ra_pos_dirs = sorted(glob.glob(os.path.join(RAMAN_DIR, "ra_pos_*")))
     if ra_pos_dirs:
         check_no_selective_dynamics(
             os.path.join(ra_pos_dirs[0], "POSCAR"),
             "ra_pos_* POSCAR — Raman displacement file"
         )
-    # Export SRUN_ARGS so run_all_vasp_folders_fixed.sh respects GPU/CPU mode
     run_command(f"export SRUN_ARGS='{SRUN_ARGS}' && bash {LOCAL_RUN_ALL_VASP}")
-    # Validate VASP convergence in every ra_pos_* directory
     ra_dirs_step14 = sorted(glob.glob(os.path.join(RAMAN_DIR, "ra_pos_*")))
     if not ra_dirs_step14:
+        print_step_result(14, ok=False, duration_s=time.time() - _t0,
+                          message="No ra_pos_* directories produced")
         raise RuntimeError(
             "Step 14 produced no ra_pos_* directories — "
             "run_all_vasp_folders_fixed.sh likely failed silently."
         )
     for d in ra_dirs_step14:
         check_vasp_convergence(d, "step-14")
+        check_dielectric_complete(d, "step-14")
     write_status(14, "completed", "Resonant VASP runs finished — "
                  f"{len(ra_dirs_step14)} directories validated")
+    print_step_result(14, ok=True, duration_s=time.time() - _t0,
+                      message=f"{len(ra_dirs_step14)} directories")
 
 # ── Step 15: Kopia post-processing ───────────────────────────────────────────
 if START_STEP <= 15:
-    # Dynamically generate kopia script (copies vasprun.xml from each ra_pos_* to AXML/)
+    print_step_header(15)
     write_status(15, "running", "Kopia post-processing")
+    _t0 = time.time()
 
-    print("\n--- Step 15: Run kopia post-processing ---")
-    # Find all ra_pos_* directories that contain vasprun.xml
     ra_dirs = sorted(glob.glob(os.path.join(RAMAN_DIR, "ra_pos_*")))
     if not ra_dirs:
-        write_status(15, "failed", "No ra_pos_* directories found — Step 13 (runRA) likely failed")
+        write_status(15, "failed", "No ra_pos_* directories found")
+        print_step_result(15, ok=False, duration_s=time.time() - _t0,
+                          message="No ra_pos_* directories")
         raise RuntimeError(
             "Step 15 failed: no ra_pos_* directories found in RAMAN_DIR. "
             "Step 13 (runRA) must create these before kopia can run."
         )
     else:
         generate_kopia_script(RAMAN_DIR, ra_dirs)
-        # Verify AXML/ was populated with non-empty XML files.
-        # Kopia runs without error-checking, so 0-byte or missing vasprun.xml
-        # files are copied silently — catching them here avoids the cryptic
-        # "File: B1a.xml not found" error from genRAram610_dynamic in Step 16.
         axml_dir = os.path.join(RAMAN_DIR, "AXML")
         if not os.path.isdir(axml_dir):
+            print_step_result(15, ok=False, duration_s=time.time() - _t0,
+                              message="AXML/ not created")
             raise RuntimeError(
                 "Step 15 failed: kopia ran but AXML/ directory was not created."
             )
         axml_files = [f for f in os.listdir(axml_dir) if f.endswith(".xml")]
         if not axml_files:
+            print_step_result(15, ok=False, duration_s=time.time() - _t0,
+                              message="AXML/ empty")
             raise RuntimeError(
-                "Step 15 failed: AXML/ exists but contains no .xml files — "
-                "kopia may have failed to copy any vasprun.xml."
+                "Step 15 failed: AXML/ exists but contains no .xml files."
             )
         empty_xml = [f for f in axml_files
                      if os.path.getsize(os.path.join(axml_dir, f)) == 0]
         if empty_xml:
+            print_step_result(15, ok=False, duration_s=time.time() - _t0,
+                              message=f"{len(empty_xml)} empty XML files")
             raise RuntimeError(
-                f"Step 15 failed: {len(empty_xml)} AXML/*.xml file(s) are empty (0 bytes). "
-                f"The corresponding ra_pos_*/vasprun.xml files are missing or empty: "
-                f"{', '.join(empty_xml[:5])}{'...' if len(empty_xml) > 5 else ''}. "
-                f"Check Step 14 VASP convergence in those directories."
+                f"Step 15 failed: {len(empty_xml)} AXML/*.xml file(s) are empty."
             )
         print(f"  [verify] AXML/ contains {len(axml_files)} valid XML files")
         write_status(15, "completed", "Kopia post-processing done")
+        print_step_result(15, ok=True, duration_s=time.time() - _t0,
+                          message=f"{len(axml_files)} XML files")
 
 # ── Step 16: RAMFILE generation ──────────────────────────────────────────────
 if START_STEP <= 16:
-    # Generate config-driven ramfile script with laser energies from settings
+    print_step_header(16)
     write_status(16, "running", "RAMFILE generation")
-
-    print("\n--- Step 16: Generate RAMFILE for each desired energy ---")
+    _t0 = time.time()
 
     ramfile_script_src = os.path.join(BINARY_UTILITIES_DIR, "ramfile_dynamic.sh")
     if not os.path.exists(ramfile_script_src):
@@ -774,26 +894,27 @@ if START_STEP <= 16:
     ramfile_script_dst = os.path.join(RAMAN_DIR, "ramfile_dynamic.sh")
     inject_ramfile_energies(ramfile_script_src, ramfile_script_dst, DESIRED_ENERGIES)
 
-    # Run with BINARY_UTILITIES_DIR on PATH for genRAram610_dynamic
     run_command(f"export PATH={BINARY_UTILITIES_DIR}:$PATH && bash ramfile_dynamic.sh", cwd=RAMAN_DIR)
 
     for energy in DESIRED_ENERGIES:
         ramfile = os.path.join(store_ram, f"RAMFILE_{energy}")
         if not os.path.exists(ramfile):
+            print_step_result(16, ok=False, duration_s=time.time() - _t0,
+                              message=f"Missing RAMFILE_{energy}")
             raise RuntimeError(
-                f"Step 16 failed: ramfile_dynamic.sh produced no RAMFILE_{energy}. "
-                f"Cannot continue without required RAMFILE for energy {energy} eV."
+                f"Step 16 failed: ramfile_dynamic.sh produced no RAMFILE_{energy}."
             )
 
     write_status(16, "completed", "RAMFILE generation done")
+    print_step_result(16, ok=True, duration_s=time.time() - _t0,
+                      message=f"{len(DESIRED_ENERGIES)} energies")
 
 # ── Step 17: Copy static files to Raman dir + output dir ─────────────────────
 if START_STEP <= 17:
-    print("\n--- Step 17: Copying static files to Raman dir + output dir ---")
-    # Static copies to raman/ (check_success=False for resume safety)
+    print_step_header(17)
+    _t0 = time.time()
     run_command(f"cp {HFFILES_DIR}/band.yaml .", cwd=RAMAN_DIR, check_success=False)
     run_command(f"cp {HFFILES_DIR}/irreps.yaml .", cwd=RAMAN_DIR, check_success=False)
-    # output/ — permanent results archive (--scratch: copied to HOME at end)
     output_dir = os.path.join(WORK_DIR, "output")
     run_command(f"mkdir -p {output_dir}", cwd=WORK_DIR)
     for src_base in (
@@ -804,104 +925,107 @@ if START_STEP <= 17:
         src = os.path.join(HFFILES_DIR, src_base)
         if os.path.exists(src) and os.path.getsize(src) > 0:
             run_command(f"cp {src} {output_dir}/", cwd=WORK_DIR, check_success=False)
-    # all_mode.txt (if it exists — Gamma-only skips phonopy_visualization)
     all_mode = os.path.join(HFFILES_DIR, "all_mode.txt")
     if os.path.exists(all_mode) and os.path.getsize(all_mode) > 0:
         run_command(f"cp {all_mode} {output_dir}/", cwd=WORK_DIR, check_success=False)
-    # mode* files (phonopy_visualization output, if any)
     for mf in glob.glob(os.path.join(HFFILES_DIR, "mode*")):
         if os.path.getsize(mf) > 0:
             run_command(f"cp {mf} {output_dir}/", cwd=WORK_DIR, check_success=False)
+
+    # ── Archive INCARs for auditability ──────────────────────────────────
+    # Copies the actual VASP INCAR files used at each stage to output/incar/
+    # so someone unfamiliar with the YAML config can inspect the settings.
+    incar_dir = os.path.join(output_dir, "incar")
+    run_command(f"mkdir -p {incar_dir}", cwd=WORK_DIR)
+    incar_sources = [
+        (os.path.join(WORK_DIR, "scf", "INCAR"),              "relax.incar"),
+        (os.path.join(HFFILES_DIR, "groundstate", "INCAR"),   "supercell_relax.incar"),
+        (os.path.join(HFFILES_DIR, "INCAR"),                  "hf_force_constants.incar"),
+        (os.path.join(RAMAN_DIR, "INCAR"),                    "dielec_raman.incar"),
+    ]
+    for src, dst_name in incar_sources:
+        dst = os.path.join(incar_dir, dst_name)
+        if os.path.exists(src) and os.path.getsize(src) > 0:
+            shutil.copy2(src, dst)
+            print(f"  [output] incar/{dst_name}")
+
     write_status(17, "completed", f"Static files copied to output/ ({output_dir})")
+    print_step_result(17, ok=True, duration_s=time.time() - _t0)
 
-# ── Steps 18-20: Energy processing loop ──────────────────────────────────────
+# ── Steps 18-21: Energy processing loop + SpectroPy plots ────────────────────
 if START_STEP <= 18:
-    print("\n--- Step 18-20: Processing Raman results for each energy ---")
-    # Status written once after loop (avoids overwriting per-iteration)
+    print_step_header(18)
     write_status(18, "running", f"Processing energies: {', '.join(DESIRED_ENERGIES)} eV")
+    _t0 = time.time()
 
-    # Validate binaries needed for this step exist before entering the energy loop
     for bin_name in ("raman_tensor", "broadening"):
         bin_path = os.path.join(BINARY_UTILITIES_DIR, bin_name)
         if not os.path.exists(bin_path):
             raise FileNotFoundError(
-                f"{bin_name} not found at {bin_path}. "
-                f"Cannot process Raman results without this binary."
+                f"{bin_name} not found at {bin_path}."
             )
 
-    # Validate RAMFILEs exist (Step 15 must have produced them)
     store_ram_step18 = os.path.join(RAMAN_DIR, "store_ramfile")
     for energy in DESIRED_ENERGIES:
         ramfile_check = os.path.join(store_ram_step18, f"RAMFILE_{energy}")
         if not os.path.exists(ramfile_check):
             raise RuntimeError(
-                f"RAMFILE_{energy} not found in store_ramfile/. "
-                f"Step 15 did not produce the required RAMFILE for energy {energy} eV. "
-                f"Cannot continue."
+                f"RAMFILE_{energy} not found in store_ramfile/."
             )
 
     for energy in DESIRED_ENERGIES:
-        print(f"\n--- Processing for energy: {energy}eV ---")
-
-        # A. Copy the energy-specific RAMFILE to working directory
+        print(f"\n  [energy] Processing {energy} eV —")
         run_command("rm -f RAMFILE", cwd=RAMAN_DIR, check_success=False)
         run_command(f"cp store_ramfile/RAMFILE_{energy} RAMFILE", cwd=RAMAN_DIR)
 
-        # B. Run raman_tensor (stdin via file redirect for Fortran reliability)
         raman_input = f"{RAMAN_INCIDENT_POL}\n{RAMAN_SCATTERED_POL}\n{RAMAN_SURFACE_NORMAL}\n"
         rt_file = os.path.join(RAMAN_DIR, ".raman_tensor_input")
         with open(rt_file, "w") as rf:
             rf.write(raman_input)
-        # Suppress stdout (hide prompt echoes); keep stderr visible for errors
         run_command(
             f"{BINARY_UTILITIES_DIR}/raman_tensor < .raman_tensor_input > /dev/null",
             cwd=RAMAN_DIR, check_success=not CPU_FLAG
         )
         os.remove(rt_file)
-        print(f"    [energy {energy}eV] Raman tensor computed with pol=({RAMAN_INCIDENT_POL},{RAMAN_SCATTERED_POL})")
+        print(f"    Raman tensor: pol=({RAMAN_INCIDENT_POL},{RAMAN_SCATTERED_POL})")
 
-        # C. Run broadening script
-        # raman_tensor leaves broadening_input empty (0 bytes) — write correct config here
+        _b = CONFIG.get("broadening", {})
         b_input = os.path.join(RAMAN_DIR, "broadening_input")
         b_content = (
-            "Raman_intensity_complex  !!! the file name\n"
-            "2            !!! peak broadening mode (1 for Gaussian, 2 for Lorentzian)\n"
-            "1            !!! half width at half maximum (cm-1)\n"
-            "200          !!! number of data points inserted between two old data points\n"
-            "2            !!! normalization\n"
+            f"Raman_intensity_complex  !!! the file name\n"
+            f"{int(_b.get('mode', 2))}            !!! peak broadening mode\n"
+            f"{int(_b.get('hwhm', 1))}            !!! half width at half maximum (cm-1)\n"
+            f"{int(_b.get('interpolation', 200))}  !!! interpolation points\n"
+            f"{int(_b.get('normalization', 2))}    !!! normalization\n"
         )
         with open(b_input, "w") as bf:
             bf.write(b_content)
-        print(f"  [setup] Wrote broadening_input for {energy}eV")
         run_command(f"{BINARY_UTILITIES_DIR}/broadening", cwd=RAMAN_DIR)
 
-        # D. Rename output files with energy suffix (check existence first)
         if os.path.exists(os.path.join(RAMAN_DIR, "Raman_intensity_complex")):
             run_command(f"mv Raman_intensity_complex Raman_intensity_complex_{energy}eV", cwd=RAMAN_DIR)
         else:
             print(f"WARNING: Raman_intensity_complex not found for {energy}eV.")
-
         if os.path.exists(os.path.join(RAMAN_DIR, "Raman_intensity_complex_broadening")):
             run_command(f"mv Raman_intensity_complex_broadening Raman_intensity_complex_broadening_{energy}eV", cwd=RAMAN_DIR)
-        else:
-            print(f"WARNING: Raman_intensity_complex_broadening not found for {energy}eV.")
 
-    write_status(18, "completed", f"Raman tensor computed for all energies: {', '.join(DESIRED_ENERGIES)} eV")
+    write_status(18, "completed", f"Raman tensor computed for: {', '.join(DESIRED_ENERGIES)} eV")
     write_status(20, "completed", f"All energies processed: {', '.join(DESIRED_ENERGIES)} eV")
+    print_step_result(18, ok=True, duration_s=time.time() - _t0,
+                      message=f"{len(DESIRED_ENERGIES)} energies processed")
 
     # ---- Step 21: Generate Raman spectra plots via SpectroPy -----------------
-    print("\n--- Step 21: Generating Raman spectra plots ---")
+    print_step_header(21)
     write_status(21, "running", "Generating publication-style Raman plots via SpectroPy")
+    _t0 = time.time()
 
     spectropy_dir = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "SpectroPy"))
     generate_plots = os.path.join(spectropy_dir, "generate_raman_plots.py")
 
-    # Create energy subdirectories with header-formatted data files
     for energy in DESIRED_ENERGIES:
         energy_label = f"{energy}eV"
         energy_dir = os.path.join(RAMAN_DIR, energy_label)
         os.makedirs(energy_dir, exist_ok=True)
-
         src_file = os.path.join(RAMAN_DIR, f"Raman_intensity_complex_{energy_label}")
         dst_file = os.path.join(energy_dir, "Raman_intensity_specific.dat")
         if os.path.exists(src_file):
@@ -910,24 +1034,22 @@ if START_STEP <= 18:
                 with open(src_file) as src:
                     f.write(src.read())
             print(f"  Prepared: {energy_label}/Raman_intensity_specific.dat")
-        else:
-            print(f"  WARNING: {src_file} not found -- skipping {energy_label}")
 
-    # Run SpectroPy plot generator
     if os.path.exists(generate_plots):
-        # Run from RAMAN_DIR so os.walk finds the energy subdirs
-        # Pipe "5.0\\n1" for default FWHM=5.0 and Lorentzian broadening
         run_command(
             f"echo -e '5.0\\nl' | python3 {generate_plots}",
             cwd=RAMAN_DIR,
             check_success=False
         )
         write_status(21, "completed", "Raman spectra plots generated")
+        print_step_result(21, ok=True, duration_s=time.time() - _t0)
     else:
         print(f"  WARNING: SpectroPy plotter not found at {generate_plots}")
         write_status(21, "failed", f"SpectroPy plotter not found at {generate_plots}")
+        print_step_result(21, ok=False, duration_s=time.time() - _t0,
+                          message="SpectroPy not found")
 
-    # ---- Aggregate Raman spectra plots + data to output/ ---------------------
+    # ---- Aggregate output ───────────────────────────────────────────────────
     output_dir = os.path.join(WORK_DIR, "output")
     raman_plots_out = os.path.join(output_dir, "raman_spectra")
     raman_data_out = os.path.join(output_dir, "raman_data")
@@ -939,18 +1061,16 @@ if START_STEP <= 18:
         png_src = os.path.join(RAMAN_DIR, energy_label, "Raman_plot_styled.png")
         if os.path.exists(png_src):
             shutil.copy2(png_src, os.path.join(raman_plots_out, f"{energy_label}.png"))
-            print(f"  [output] Copied: raman_spectra/{energy_label}.png")
+            print(f"  [output] raman_spectra/{energy_label}.png")
 
-    for pattern in ("Raman_intensity_complex_*.eV", "Raman_intensity_complex_broadening_*.eV"):
+    for pattern in ("Raman_intensity_complex_*eV", "Raman_intensity_complex_broadening_*eV"):
         for f in glob.glob(os.path.join(RAMAN_DIR, pattern)):
             shutil.copy2(f, os.path.join(raman_data_out, os.path.basename(f)))
-            print(f"  [output] Copied: raman_data/{os.path.basename(f)}")
-
-    print("\n--- Automation workflow complete. ---")
+            print(f"  [output] raman_data/{os.path.basename(f)}")
 
     write_status("final", "completed", "Automation workflow complete")
 
-    # --scratch: copy output/ from WORK_DIR to HOME (SCRATCH may be purged)
+    # --scratch: copy output/ from WORK_DIR to HOME
     if SCRATCH_FLAG:
         home_output = os.path.join(MATERIAL_DIR, "output")
         scratch_output = os.path.join(WORK_DIR, "output")
@@ -960,11 +1080,5 @@ if START_STEP <= 18:
             run_command(f"cp -r {scratch_output}/* {home_output}/", cwd=MATERIAL_DIR,
                         check_success=False)
             print(f"  [scratch] Results saved to: {home_output}")
-        else:
-            print(f"  [scratch] No output/ found on SCRATCH -- nothing to copy back.")
 
-# --- Self-cancel salloc (interactive mode only; batch exits naturally) ---
-if "SLURM_JOB_ID" in os.environ and os.environ.get("SLURM_SUBMIT_HOST", "") == "":
-    run_command(f"{BINARY_UTILITIES_DIR}/end_salloc.sh", check_success=False)
-else:
-    print("Batch job mode detected — skipping end_salloc.sh (job will exit naturally).")
+# end_salloc.sh is not called — tmux + exit handles teardown correctly.

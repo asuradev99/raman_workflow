@@ -1,64 +1,24 @@
 #!/bin/bash
 # =============================================================================
-#  Run GGA Workflows — Sequential Raman Pipeline for GGA/LDA Functionals
+#  Serial Multi-Material Runner — Interactive Mode
 # =============================================================================
-#  Automates the full Raman workflow for available materials.
+#  Processes materials one at a time inside a single salloc allocation, then
+#  generates plots for each. Useful for running multiple materials in one
+#  interactive session without re-allocating.
 #
-#  Usage (inside tmux on login node):
-#    tmux new-session -s raman
+#  Usage (inside tmux):
+#    salloc -N 1 -C gpu --gpus-per-node=4 -t 08:00:00 --qos=interactive -A m526
+#    bash raman_workflow/run_gga_batch.sh              # resume all
+#    bash raman_workflow/run_gga_batch.sh --restart     # fresh start
+#    bash raman_workflow/run_gga_batch.sh --no-scratch  # run on HOME
 #
-#    # -- GPU mode (default) -------------------------------------------------
-#    salloc -N 1 -C gpu --gpus-per-node=4 -t 04:00:00 \
-#           --qos=interactive -A m526
-#    bash raman_workflow/run_gga_batch.sh              # resume from last step
-#    bash raman_workflow/run_gga_batch.sh --restart     # start fresh
-#
-#    # -- CPU mode -----------------------------------------------------------
-#    salloc -N 1 -C cpu -t 04:00:00 --qos=interactive -A m526
-#    bash raman_workflow/run_gga_batch.sh --cpu         # resume on CPU
-#    bash raman_workflow/run_gga_batch.sh --cpu --restart  # fresh start on CPU
-#
-#    # Ctrl+B, d  to detach from tmux
-#
-#  The script processes materials in order, then plots results for each.
+#  Status: each material writes its own workflow.log on HOME.
 # =============================================================================
 
 set -euo pipefail
 
-# ── Parse arguments ────────────────────────────────────────────────────────────
-RESTART_FLAG=""
-CPU_FLAG=""
-SCRATCH_FLAG=""
-for arg in "$@"; do
-    if [ "$arg" = "--restart" ] || [ "$arg" = "-r" ]; then
-        RESTART_FLAG="--restart"
-    elif [ "$arg" = "--cpu" ]; then
-        CPU_FLAG="--cpu"
-    elif [ "$arg" = "--scratch" ]; then
-        SCRATCH_FLAG="--scratch"
-    elif [ "$arg" = "-h" ] || [ "$arg" = "--help" ]; then
-        echo "Usage: bash raman_workflow/run_gga_batch.sh [--cpu] [--scratch] [--restart|-r] [-h]"
-        echo ""
-        echo "  --cpu          Use CPU VASP binary and CPU node srun arguments."
-        echo "                 The salloc must use -C cpu (not -C gpu)."
-        echo "  --scratch      Run VASP on \$SCRATCH (fast I/O), keep config on \$HOME."
-        echo "  --restart, -r  Delete all generated files and restart from scratch"
-        echo "                  for each material. Without this flag, the pipeline"
-        echo "                  resumes from the last completed step."
-        echo "  -h, --help     Show this help message."
-        echo ""
-        echo "Examples:"
-        echo "  salloc -N 1 -C gpu --gpus-per-node=4 -t 04:00:00 --qos=interactive -A m526"
-        echo "  bash raman_workflow/run_gga_batch.sh"
-        echo ""
-        echo "  salloc -N 1 -C cpu -t 04:00:00 --qos=interactive -A m526"
-        echo "  bash raman_workflow/run_gga_batch.sh --cpu"
-        exit 0
-    fi
-done
-
-# ── Configuration ──────────────────────────────────────────────────────────────
-# Edit this list to change which materials are processed.
+# ── Configuration ────────────────────────────────────────────────────────────
+# Edit this list to change which materials are processed (in order).
 MATERIALS=(
     "hBN_PBEsol_6x6x1"
     "hBN_PBEsol_5x5x1"
@@ -66,198 +26,158 @@ MATERIALS=(
     "hBN_PBEsol_3x3x1"
 )
 
+# ── Parse arguments ──────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-SUMMARY_LOG="$(dirname "$SCRIPT_DIR")/log/gga_workflow_${TIMESTAMP}.log"
+RESTART_FLAG=""
+SCRATCH_FLAG="--scratch"
 
-# ── Logging helper ────────────────────────────────────────────────────────────
-log() {
-    local msg="[$(date '+%H:%M:%S')] $*"
-    echo "$msg"
-    echo "$msg" >> "$SUMMARY_LOG"
-}
+for arg in "$@"; do
+    case "$arg" in
+        --restart|-r)  RESTART_FLAG="--restart" ;;
+        --no-scratch)  SCRATCH_FLAG="" ;;
+        -h|--help)
+            echo "Usage: bash run_gga_batch.sh [--restart] [--no-scratch]"
+            echo ""
+            echo "  Processes ${#MATERIALS[@]} materials in sequence, then plots each."
+            echo "  Materials: ${MATERIALS[*]}"
+            echo ""
+            echo "  --restart     Delete all generated files, restart each from scratch"
+            echo "  --no-scratch  Run VASP on HOME instead of \$SCRATCH"
+            echo ""
+            echo "  Prerequisites:"
+            echo "    salloc -N 1 -C gpu --gpus-per-node=4 -t 08:00:00 --qos=interactive -A m526"
+            echo "    bash raman_workflow/run_gga_batch.sh"
+            exit 0
+            ;;
+    esac
+done
 
-# ── Validate salloc ───────────────────────────────────────────────────────────
-log "=== GGA Workflow ==="
-log "Materials: ${MATERIALS[*]}"
-[ -n "$CPU_FLAG" ] && log "Mode: CPU (--cpu)"
-log ""
-
+# ── Validate salloc ─────────────────────────────────────────────────────────
 if [ -z "${SLURM_JOB_ID:-}" ]; then
-    log "ERROR: Not running inside a Slurm allocation."
-    if [ -n "$CPU_FLAG" ]; then
-        log "Allocate a CPU node:"
-        log "  salloc -N 1 -C cpu -t 04:00:00 --qos=interactive -A m526"
-    else
-        log "Allocate a GPU node:"
-        log "  salloc -N 1 -C gpu --gpus-per-node=4 -t 04:00:00 --qos=interactive -A m526"
-    fi
-    log "Then run this script from the allocated shell."
+    echo "ERROR: Not running inside a Slurm allocation."
+    echo "Allocate a GPU node first:"
+    echo "  salloc -N 1 -C gpu --gpus-per-node=4 -t 08:00:00 --qos=interactive -A m526"
     exit 1
 fi
 
-log "Job ID:  $SLURM_JOB_ID"
-log "Node:    $(hostname)"
-if [ -z "$CPU_FLAG" ]; then
-    log "GPUs:    $SLURM_GPUS_PER_NODE"
-fi
+# ── Source environment ──────────────────────────────────────────────────────
+source ~/.bashrc 2>/dev/null || true
 
-# ── Source environment ─────────────────────────────────────────────────────────
-log ""
-log "Sourcing ~/.bashrc..."
-source ~/.bashrc
-
-for var in RAMAN_PROJECT_DIR BINARY_UTILITIES_DIR; do
+for var in RAMAN_PROJECT_DIR BINARY_UTILITIES_DIR VASP_BINARY; do
     if [ -z "${!var:-}" ]; then
         echo "ERROR: $var is not set. Add it to ~/.bashrc"
         exit 1
     fi
 done
-if [ -n "$CPU_FLAG" ]; then
-    if [ -z "${VASP_BINARY_CPU:-}" ]; then
-        echo "WARNING: VASP_BINARY_CPU not set — using default CPU binary."
-    fi
-else
-    if [ -z "${VASP_BINARY:-}" ]; then
-        echo "ERROR: VASP_BINARY is not set. Add it to ~/.bashrc."
+
+echo "════════════════════════════════════════════════════════════"
+echo "  Serial Multi-Material Runner"
+echo "  Job ID:       $SLURM_JOB_ID"
+echo "  Node:         $(hostname)"
+echo "  Materials:    ${#MATERIALS[@]} (${MATERIALS[*]})"
+echo "  Scratch:      ${SCRATCH_FLAG:---scratch}"
+echo "════════════════════════════════════════════════════════════"
+
+# ── Preflight: verify binaries ──────────────────────────────────────────────
+echo ""
+echo "Checking binaries..."
+for bin in ramdiscar genRApos610 runRA raman_tensor broadening; do
+    if [ ! -x "${BINARY_UTILITIES_DIR}/${bin}" ]; then
+        echo "ERROR: ${bin} not executable at ${BINARY_UTILITIES_DIR}/${bin}"
         exit 1
     fi
-fi
+done
+echo "  All binaries found."
 
-log "  RAMAN_PROJECT_DIR:      $RAMAN_PROJECT_DIR"
-log "  BINARY_UTILITIES_DIR:   $BINARY_UTILITIES_DIR"
-if [ -n "$CPU_FLAG" ]; then
-    log "  VASP_BINARY:            $VASP_BINARY (or CPU default if unset)"
-else
-    log "  VASP_BINARY:            $VASP_BINARY"
-fi
+# ── Load modules ────────────────────────────────────────────────────────────
+echo ""
+echo "Loading GPU modules..."
+module load ${VASP_MODULES:-gpu PrgEnv-nvidia cray-hdf5 cray-fftw nccl/2.18.3-cu12 vasp/6.4.3-gpu}
+echo "  Modules loaded."
 
-# ── Load modules ──────────────────────────────────────────────────────────────
-log ""
-log "Loading modules..."
-if [ -n "$CPU_FLAG" ]; then
-    module load ${VASP_MODULES_CPU:-cpu PrgEnv-gnu cray-hdf5 cray-fftw vasp/6.4.3-cpu}
-else
-    module load ${VASP_MODULES:-gpu PrgEnv-nvidia cray-hdf5 cray-fftw nccl/2.18.3-cu12 vasp/6.4.3-gpu}
-fi
-log "  Modules loaded."
-
-# ── Activate conda ─────────────────────────────────────────────────────────────
-log ""
-log "Activating phonopy conda environment..."
+# ── Activate conda ──────────────────────────────────────────────────────────
+echo ""
+echo "Activating phonopy conda environment..."
 source /global/common/software/m3035/conda/etc/profile.d/conda.sh
 conda activate /global/common/software/m526/phonopy_env
-log "  Conda environment active."
+echo "  Conda environment active."
 
-# ── Main loop: process each material ──────────────────────────────────────────
+# ── Main loop ───────────────────────────────────────────────────────────────
 OVERALL_SUCCESS=true
-MATERIAL_INDEX=1
 TOTAL=${#MATERIALS[@]}
 
-for MATERIAL in "${MATERIALS[@]}"; do
+for ((i=0; i<TOTAL; i++)); do
+    MATERIAL="${MATERIALS[$i]}"
     MATERIAL_DIR="$RAMAN_PROJECT_DIR/$MATERIAL"
-    SEP="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    N=$((i + 1))
 
-    log ""
-    log "$SEP"
-    log "  [${MATERIAL_INDEX}/${TOTAL}] Processing: ${MATERIAL}"
-    log "$SEP"
-    log "  Directory: ${MATERIAL_DIR}"
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  [$N/$TOTAL] $MATERIAL"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    # Validate material directory exists
     if [ ! -d "$MATERIAL_DIR" ]; then
-        log "  ERROR: Material directory does not exist: ${MATERIAL_DIR}"
-        log "  Skipping ${MATERIAL}."
+        echo "  SKIP — directory not found: $MATERIAL_DIR"
         OVERALL_SUCCESS=false
-        MATERIAL_INDEX=$((MATERIAL_INDEX + 1))
         continue
     fi
 
-    # ── Step A: Run the Raman pipeline ───────────────────────────────────────
-    EXTRA_ARGS=""
-    [ -n "$RESTART_FLAG" ] && EXTRA_ARGS="$EXTRA_ARGS $RESTART_FLAG"
-    [ -n "$CPU_FLAG" ] && EXTRA_ARGS="$EXTRA_ARGS $CPU_FLAG"
-    [ -n "$SCRATCH_FLAG" ] && EXTRA_ARGS="$EXTRA_ARGS $SCRATCH_FLAG"
-    log ""
-    log "  [A] Running Raman pipeline${EXTRA_ARGS}..."
+    # ── Run pipeline ────────────────────────────────────────────────────
+    PIPELINE_ARGS="$RESTART_FLAG"
+    [ -n "$SCRATCH_FLAG" ] && PIPELINE_ARGS="$PIPELINE_ARGS $SCRATCH_FLAG"
 
-    cd "$MATERIAL_DIR" || {
-        log "  ERROR: Cannot cd to ${MATERIAL_DIR}"
-        OVERALL_SUCCESS=false
-        MATERIAL_INDEX=$((MATERIAL_INDEX + 1))
-        continue
-    }
+    echo "  Running pipeline..."
+    cd "$MATERIAL_DIR" || { echo "  ERROR: Cannot cd to $MATERIAL_DIR"; OVERALL_SUCCESS=false; continue; }
 
-    # shellcheck disable=SC2086
-    _pipeline_ok=true
-    if python "$SCRIPT_DIR/automation_raman_analysis.py" $EXTRA_ARGS; then
-        log "  [A] Pipeline completed successfully for ${MATERIAL}."
+    PIPELINE_OK=true
+    if python "$SCRIPT_DIR/automation_raman_analysis.py" $PIPELINE_ARGS; then
+        echo "  ✓ Pipeline completed"
     else
-        log "  [A] Pipeline FAILED for ${MATERIAL} (exit code $?)."
-        log "  Continuing to next material..."
+        echo "  ✗ Pipeline FAILED (exit code $?)"
+        echo "  Check: tail -80 $MATERIAL_DIR/workflow.log"
         OVERALL_SUCCESS=false
-        _pipeline_ok=false
+        PIPELINE_OK=false
     fi
 
-    # Return to script directory for next iteration / plotting
     cd "$SCRIPT_DIR" 2>/dev/null || true
 
-    # If the pipeline failed, skip plotting and go to next material
-    if [ "$_pipeline_ok" != "true" ]; then
-        MATERIAL_INDEX=$((MATERIAL_INDEX + 1))
-        continue
+    # ── Plot results ─────────────────────────────────────────────────────
+    if [ "$PIPELINE_OK" = "true" ]; then
+        echo ""
+        echo "  Generating plots..."
+        if bash "$SCRIPT_DIR/plot_raman_results.sh" "$MATERIAL_DIR"; then
+            echo "  ✓ Plots generated → $MATERIAL_DIR/output/raman_spectra/"
+        else
+            echo "  ✗ Plotting FAILED"
+            OVERALL_SUCCESS=false
+        fi
     fi
 
-    # ── Step B: Plot results ─────────────────────────────────────────────────
-    log ""
-    log "  [B] Plotting results for ${MATERIAL}..."
-
-    if bash "$SCRIPT_DIR/plot_raman_results.sh" "$MATERIAL_DIR"; then
-        log "  [B] Plotting completed for ${MATERIAL}."
-    else
-        log "  [B] Plotting FAILED for ${MATERIAL} (exit code $?)."
-        OVERALL_SUCCESS=false
-    fi
-
-    # Return to script directory for next iteration
-    cd "$SCRIPT_DIR" 2>/dev/null || true
-    MATERIAL_INDEX=$((MATERIAL_INDEX + 1))
-
-    log ""
-    log "  Finished ${MATERIAL}."
+    echo ""
+    echo "  Done: $MATERIAL ($N/$TOTAL)"
 done
 
-# ── Summary ────────────────────────────────────────────────────────────────────
-SEP="═══════════════════════════════════════════════════════════════════════════"
-log ""
-log "$SEP"
-log "  GGA WORKFLOW — COMPLETE"
-log "$SEP"
-log "  Log file: ${SUMMARY_LOG}"
-log ""
+# ── Summary ─────────────────────────────────────────────────────────────────
+echo ""
+echo "════════════════════════════════════════════════════════════"
+if [ "$OVERALL_SUCCESS" = "true" ]; then
+    echo "  ALL MATERIALS COMPLETE"
+else
+    echo "  FINISHED WITH ERRORS — check workflow.log files"
+fi
+echo "════════════════════════════════════════════════════════════"
+echo ""
 
 for MATERIAL in "${MATERIALS[@]}"; do
-    MATERIAL_DIR="$RAMAN_PROJECT_DIR/$MATERIAL"
-    STATUS_FILE="${MATERIAL_DIR}/workflow.log"
-    OUTPUT_DIR="${MATERIAL_DIR}/output"
-
+    STATUS_FILE="$RAMAN_PROJECT_DIR/$MATERIAL/workflow.log"
     if [ -f "$STATUS_FILE" ]; then
-        # Extract overall status from the last status block in the unified log
-        FINAL_STATUS=$(grep -oP 'Status\s+\K(RUNNING|COMPLETED|FAILED)' "$STATUS_FILE" | tail -1 || echo "unknown")
-        [ -z "$FINAL_STATUS" ] && FINAL_STATUS="unknown"
-        log "  ${MATERIAL}: ${FINAL_STATUS}"
+        STATUS=$(grep -oP 'Status\s+\K(RUNNING|COMPLETED|FAILED)' "$STATUS_FILE" | tail -1 || echo "?")
+        echo "  $STATUS  $MATERIAL"
     else
-        log "  ${MATERIAL}: No workflow.log found"
-    fi
-
-    # List output files
-    if [ -d "$OUTPUT_DIR" ]; then
-        RAMAN_PLOTS=$(find "$OUTPUT_DIR/raman_spectra" -name "*.png" 2>/dev/null | wc -l)
-        log "           -> ${RAMAN_PLOTS} Raman spectra plots"
+        echo "  ?  $MATERIAL (no workflow.log)"
     fi
 done
-
-log ""
+echo ""
 log "$SEP"
 
 if [ "$OVERALL_SUCCESS" = true ]; then
