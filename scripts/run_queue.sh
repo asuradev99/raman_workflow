@@ -256,7 +256,7 @@ echo ""
 echo "=== Pipeline starting at \$(date) ==="
 echo "Flags: ${PIPELINE_FLAGS}"
 cd "${MATERIAL_DIR}"
-python "${RAMAN_DIR}/automation_raman_analysis.py" ${PIPELINE_FLAGS}
+python "${RAMAN_DIR}/src/automation_raman_analysis.py" ${PIPELINE_FLAGS}
 PIPELINE_EXIT=\$?
 echo ""
 echo "=== Pipeline finished at \$(date) (exit=\$PIPELINE_EXIT) ==="

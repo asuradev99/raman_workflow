@@ -1,0 +1,19 @@
+phonopy:
+  dim: "6 6 1"
+scf_kpoints:
+  mesh: "24 24 1"
+hf_kpoints:
+  mesh: "4 4 1"
+sup_relax_kpoints:
+  mesh: "4 4 1"
+raman_kpoints:
+  mesh: "24 24 1"
+incar_settings:
+  relax: |
+    GGA = PS
+  dielec: |
+    GGA = PS
+  hf: |
+    GGA = PS
+  static: |
+    GGA = PS

@@ -460,7 +460,7 @@ if SCRATCH_FLAG:
 #  WORKFLOW STEPS — dispatched to steps/ modules
 # ═══════════════════════════════════════════════════════════════════════════════
 
-from steps import STEP_FUNCTIONS, build_context
+from src import STEP_FUNCTIONS, build_context
 
 ctx = build_context(
     write_status,

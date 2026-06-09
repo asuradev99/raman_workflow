@@ -130,7 +130,7 @@ for ((i=0; i<TOTAL; i++)); do
     cd "$MATERIAL_DIR" || { echo "  ERROR: Cannot cd to $MATERIAL_DIR"; OVERALL_SUCCESS=false; continue; }
 
     PIPELINE_OK=true
-    if python "$SCRIPT_DIR/automation_raman_analysis.py" $PIPELINE_ARGS; then
+    if python "$SCRIPT_DIR/../src/automation_raman_analysis.py" $PIPELINE_ARGS; then
         echo "  ✓ Pipeline completed"
     else
         echo "  ✗ Pipeline FAILED (exit code $?)"

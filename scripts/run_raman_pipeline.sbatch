@@ -38,7 +38,7 @@ MATERIAL_NAME="${MATERIAL_NAME:-hBN}"
 # $0 is unreliable inside Slurm jobs (it points to the spool dir).
 # Use the known project location instead.
 PIPELINE_DIR="$HOME/raman_workflow"
-AUTOMATION_SCRIPT="$PIPELINE_DIR/automation_raman_analysis.py"
+AUTOMATION_SCRIPT="$PIPELINE_DIR/src/automation_raman_analysis.py"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Parse flags ─────────────────────────────────────────────────────────────

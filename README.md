@@ -47,8 +47,8 @@ conda activate /global/common/software/m526/phonopy_env
 
 ```
 raman_workflow/
-├── automation_raman_analysis.py   # Pipeline entry point (8-step dispatcher)
-├── steps/                         # Step implementations (one per file)
+├── src/                            # Pipeline source
+│   ├── automation_raman_analysis.py   # Entry point (8-step dispatcher)
 │   ├── scf_relax.py               # 1. VASP relaxation
 │   ├── supercell.py               # 2. Phonopy supercell + relaxation
 │   ├── hf_setup.py                # 3. hf/ directory setup
