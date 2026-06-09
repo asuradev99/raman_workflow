@@ -72,38 +72,39 @@ RAMAN_DIR = None
 STATUS_FILE = os.path.join(MATERIAL_DIR, "workflow.log")
 OUTPUT_FILE = os.path.join(MATERIAL_DIR, "workflow.out")
 
-# Redirect ALL output early so workflow.out captures everything printed
-# (config loading, --restart messages, scratch setup, etc.).
-sys.stdout = Tee(STATUS_FILE, OUTPUT_FILE)
-
 # ── --restart: delete all generated directories, keep input/ + config ────────
 if RESTART_FLAG:
-    sep = "=" * 80
-    print(f"\n{sep}")
-    print("  --restart flag detected: Deleting all generated output...")
-    print(f"{sep}\n")
-
     # Clean generated dirs from WORK_DIR (SCRATCH or HOME)
     for dirname in ("scf", "hf", "raman", "output"):
         dp = os.path.join(WORK_DIR, dirname)
         if os.path.exists(dp) and not os.path.islink(dp):
             shutil.rmtree(dp)
-            print(f"  Removed: {dp}/")
+            print(f"  [restart] Removed: {dp}/")
 
     # --scratch: also clean HOME/output/ (final copy destination)
     if SCRATCH_FLAG:
         home_output = os.path.join(MATERIAL_DIR, "output")
         if os.path.exists(home_output) and not os.path.islink(home_output):
             shutil.rmtree(home_output)
-            print(f"  Removed HOME output/: {home_output}")
+            print(f"  [restart] Removed HOME output/: {home_output}")
 
-    # Remove workflow.log from HOME (always there now)
-    if os.path.exists(STATUS_FILE):
-        os.remove(STATUS_FILE)
-        print(f"  Removed: {STATUS_FILE}")
+    # Remove all log files (clean start)
+    for log_name in ("workflow.log", "workflow.out", "salloc_output.log"):
+        log_path = os.path.join(MATERIAL_DIR, log_name)
+        if os.path.exists(log_path):
+            os.remove(log_path)
+            print(f"  [restart] Removed: {log_path}")
 
-    print(f"\n  [restart] Done — input/ (including workflow_settings.yaml) preserved.")
-    print(f"  [restart] Starting fresh pipeline from step 3...\n")
+    print(f"  [restart] Done — input/ (including workflow_settings.yaml) preserved.")
+    print(f"  [restart] Starting fresh pipeline from step 3...")
+
+# Redirect ALL output AFTER restart cleanup so logs are fresh.
+# (Must come after cleanup — otherwise Tee holds file handles open,
+#  preventing log files from being properly replaced.)
+sys.stdout = Tee(STATUS_FILE, OUTPUT_FILE)
+
+if RESTART_FLAG:
+    print("")  # blank line after restart messages
 
 # Binary utilities dir (override via env var)
 DEFAULT_BINARY_UTILITIES_DIR = "/global/cfs/cdirs/m526/vasp_binaries/binary_utility"

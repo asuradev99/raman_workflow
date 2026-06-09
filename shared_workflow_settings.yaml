@@ -1,0 +1,208 @@
+# =============================================================================
+# Shared Workflow Settings — inherited by all per-material configs
+# =============================================================================
+# Per-material workflow_settings.yaml files override only what differs
+# (name, phonopy.dim, hf_kpoints.mesh). Everything else comes from here.
+#
+# Loading order (in automation_raman_analysis.py):
+#   1. Hardcoded Python defaults (fallback safety net)
+#   2. This shared file                       ← base layer
+#   3. Per-material workflow_settings.yaml     ← overrides
+# =============================================================================
+_description: "Shared computational settings for all hBN Raman simulations"
+_version: "2026-06-02"
+
+# ── Material identity ─────────────────────────────────────────────────────────
+# Display label used in status files and terminal output.
+material: "Hexagonal Boron Nitride"
+
+# ── Raman tensor polarization ─────────────────────────────────────────────────
+# Defines the incident/scattered light polarization geometry for Raman intensity
+# calculations. incident_polarization: direction of incoming E-field.
+# scattered_polarization: direction of detected polarization component.
+# surface_normal: out-of-plane direction for 2D materials (z for monolayer).
+raman_tensor:
+  incident_polarization:   "1.0 0.0 0.0"
+  scattered_polarization: "1.0 0.0 0.0"
+  surface_normal: "z"
+
+# ── Laser energies (eV) ──────────────────────────────────────────────────────
+# Resonant Raman frequencies at which to compute the Raman spectrum.
+# 1.96 eV ≈ 632 nm (HeNe laser), 2.33 eV ≈ 532 nm (Nd:YAG, frequency-doubled).
+desired_energies:
+  - "1.96"
+  - "2.33"
+
+# ── Phonopy settings ─────────────────────────────────────────────────────────
+phonopy:
+  # Finite-displacement amplitude (Å) for force-constant calculation.
+  # 0.03 Å is small enough for harmonic response, large enough for numerical stability.
+  amplitude: 0.03
+  # Raman is a q=0 (Gamma-point) property — only the zone-center phonon
+  # frequencies and eigenvectors are needed. A single Gamma-point is sufficient.
+  band_path: "0 0 0  0 0 0"
+  band_labels: "GAMMA GAMMA"
+  band_points: 1
+
+# ── VASP srun arguments (GPU) ────────────────────────────────────────────────
+# The ``raw`` key (when present) is passed verbatim to srun, supporting
+# any configuration: single-node, multi-node, --gpus-per-task, etc.
+#
+#   Single-node (1 node × 4 GPUs):
+#     raw: "--cpu_bind=cores --gpus-per-node=4 --ntasks-per-node=4 --nodes=1 --cpus-per-task=32 -C gpu"
+#   Multi-node (4 nodes × 4 GPUs):
+#     raw: "--cpu_bind=cores --gpus-per-node=4 --ntasks-per-node=4 --nodes=4 --cpus-per-task=32 -C gpu"
+#
+# When ``raw`` is absent, Python-level defaults build the equivalent of:
+#   --cpu_bind=cores --gpus 4 --ntasks 4 --cpus-per-task 32 -C gpu
+vasp_srun:
+  raw: "--cpu_bind=cores --gpus-per-node=4 --ntasks-per-node=4 --nodes=1 --cpus-per-task=32 -C gpu"
+
+# ── VASP srun arguments (CPU) ────────────────────────────────────────────────
+# Same ``raw`` mechanism as GPU above. Python-level defaults when absent:
+#   --cpu_bind=cores --ntasks 32 --cpus-per-task 4
+vasp_srun_cpu:
+  raw: "--cpu_bind=cores --ntasks 32 --cpus-per-task 4 --nodes=1"
+
+# ── VASP loop restart ────────────────────────────────────────────────────────
+# the pipeline retries up to max_restarts times before failing.
+vasp_loop:
+  max_restarts: 3
+
+# ── HF parallel mode ─────────────────────────────────────────────────────────
+# When true, Step 9 launches all hf_POSCAR-* VASP runs concurrently, splitting
+# GPUs evenly across directories.  When false (default), runs serially.
+# hf_parallel: true
+
+# ── Broadening parameters ───────────────────────────────────────────────────
+# Controls the broadening applied to the Raman spectrum by the `broadening` binary.
+# mode: 1 = Gaussian, 2 = Lorentzian
+# hwhm: half-width at half-maximum (cm⁻¹)
+# interpolation: data points inserted between old data points
+# normalization: 1 = peak-normalized, 2 = area-normalized
+broadening:
+  mode: 2
+  hwhm: 1
+  interpolation: 200
+  normalization: 2
+
+# ── SCF k-points (unit cell) ────────────────────────────────────────────────
+# Gamma-centered k-point mesh for the initial unit-cell SCF relaxation (Step 3).
+scf_kpoints:
+  mesh: "24 24 1"
+  shift: "0 0 0"
+
+# ── Supercell relaxation k-points ────────────────────────────────────────────
+# Gamma-centered k-point mesh for the supercell ionic relaxation (Step 4:
+# hf/groundstate/ directory). The mesh density is set per-material in each
+# workflow_settings.yaml, matching the supercell size.
+sup_relax_kpoints:
+  shift: "0 0 0"
+
+# ── HF k-points shift ────────────────────────────────────────────────────────
+# Gamma-centered k-point mesh for force-constant calculations (hf/ directory).
+# Only the shift is shared; the mesh density varies per supercell size.
+hf_kpoints:
+  shift: "0 0 0"
+
+# ── Raman k-points shift ─────────────────────────────────────────────────────
+# Gamma-centered k-point mesh for resonant Raman VASP runs (raman/ directory).
+# The mesh density is set per-material (same as hf_kpoints.mesh by default);
+# only the shift is shared here.
+raman_kpoints:
+  shift: "0 0 0"
+
+# ── Eigenvectors band path ───────────────────────────────────────────────────
+# Band path for phonon eigenvector output. Gamma-only is sufficient since
+# Raman is a zone-center (q=0) property.
+eigenvectors_band:
+  path: "0.0 0.0 0.0  0.0 0.0 0.0"
+  labels: "GAMMA GAMMA"
+  points: 1
+
+incar_templates:
+  relax: |
+    System = hexagonal Boron Nitride - initial primitive unit cell relaxation
+    ISTART = 1
+    ICHARG = 1
+    PREC = Accurate
+    ENCUT = 500
+    ADDGRID = .TRUE.
+    ALGO = Fast
+    EDIFF = 1E-08
+    NELM = 100
+    EDIFFG = -0.001
+    NSW = 200
+    IBRION = 2
+    ISIF = 3
+    POTIM = 0.1
+    LATTICE_CONSTRAINTS = .TRUE. .TRUE. .FALSE.
+    ISMEAR = 0
+    SIGMA = 0.01
+    LCHARG= .TRUE.
+    LWAVE =.TRUE.
+    NPAR = 1
+    KPAR = 4
+  dielec: |
+    System = hexagonal Boron Nitride - dielectric Raman tensor calculation
+    ISTART = 1
+    ICHARG = 1
+    PREC = Accurate
+    ENCUT = 500
+    ADDGRID = .TRUE.
+    ALGO = Fast
+    EDIFF = 1E-08
+    NELM = 100
+    EDIFFG = -0.001
+    NSW = 0
+    IBRION = 2
+    ISIF = 4
+    POTIM = 0.1
+    ISMEAR = 0
+    SIGMA = 0.01
+    LCHARG= .FALSE.
+    LWAVE =.FALSE.
+    NEDOS = 50001
+    OMEGAMAX = 50
+    LOPTICS = .TRUE.
+    NBANDS = 24
+    NPAR = 1
+    KPAR = 4
+  hf: |
+    System = hexagonal Boron Nitride - harmonic force constant calculation
+    ISTART = 1
+    ICHARG = 1
+    PREC = Accurate
+    ENCUT = 500
+    ADDGRID = .TRUE.
+    ALGO = Fast
+    EDIFF = 1E-08
+    NELM = 100
+    NSW = 0
+    ISMEAR = 0
+    SIGMA = 0.01
+    LCHARG= .FALSE.
+    LWAVE =.FALSE.
+    NPAR = 1
+    KPAR = 4
+  supercell_relax: |
+    System = hexagonal Boron Nitride - supercell ionic relaxation
+    ISTART = 1
+    ICHARG = 1
+    PREC = Accurate
+    ENCUT = 500
+    ADDGRID = .TRUE.
+    ALGO = Fast
+    EDIFF = 1E-08
+    NELM = 100
+    EDIFFG = -0.001
+    NSW = 100
+    IBRION = 2
+    ISIF = 2
+    POTIM = 0.1
+    ISMEAR = 0
+    SIGMA = 0.01
+    LCHARG= .TRUE.
+    LWAVE =.TRUE.
+    NPAR = 1
+    KPAR = 4
