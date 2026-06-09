@@ -42,6 +42,7 @@ set -uo pipefail
 # ═══════════════════════════════════════════════════════════════════════════════
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+RAMAN_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # raman_workflow/ root
 RESTART_FLAG=""
 SCRATCH_FLAG="--scratch"
 CPU_FLAG=""
@@ -50,7 +51,7 @@ RETRY_FAILED=false     # only meaningful with --retry-failed
 
 # ── Load queue materials ──────────────────────────────────────────────────
 # Edit queue_materials.conf to change what runs without touching this script.
-QUEUE_CONF="${SCRIPT_DIR}/queue_materials.conf"
+QUEUE_CONF="${RAMAN_DIR}/queue_materials.conf"
 if [ -f "$QUEUE_CONF" ]; then
     source "$QUEUE_CONF"
 else
@@ -255,7 +256,7 @@ echo ""
 echo "=== Pipeline starting at \$(date) ==="
 echo "Flags: ${PIPELINE_FLAGS}"
 cd "${MATERIAL_DIR}"
-python "${SCRIPT_DIR}/automation_raman_analysis.py" ${PIPELINE_FLAGS}
+python "${RAMAN_DIR}/automation_raman_analysis.py" ${PIPELINE_FLAGS}
 PIPELINE_EXIT=\$?
 echo ""
 echo "=== Pipeline finished at \$(date) (exit=\$PIPELINE_EXIT) ==="

@@ -1,23 +1,12 @@
 #!/bin/bash
 
-# =============================================================================
-#  automate_hfiles_fixed.sh — env-aware local copy
-# =============================================================================
-#  Runs VASP in each hf_POSCAR-* subdirectory for phonon force-constant
-#  calculations. Unlike the original at $BINARY_UTILITIES_DIR, this copy
-#  reads $SRUN_ARGS from the environment, so it respects whatever srun
-#  configuration the Python pipeline has set (single-node, multi-node, etc.).
-#
-#  The env var $SRUN_ARGS is exported by the pipeline before calling this
-#  script. Falls back to the legacy 4-GPU hardcoded params if not set.
-# =============================================================================
-
 # --- Configuration ---
 VASP_BINARY_PATH="${VASP_BINARY:-/global/cfs/cdirs/m526/liangbo/bin/gpu/vasp_std}"
 MODULES_TO_LOAD="${VASP_MODULES:-gpu PrgEnv-nvidia cray-hdf5 cray-fftw nccl/2.18.3-cu12 vasp/6.4.3-gpu}"
 
 # Read srun params from the environment (set by the Python pipeline via
-# build_srun_args()). Falls back to legacy 4-GPU params for standalone use.
+# build_srun_args()), for cases for ex in which I am running the directories in parallel (not implemented hyet). 
+# Falls back to legacy 4-GPU params for standalone use.
 SRUN_PARAMS="${SRUN_ARGS:---cpu_bind=cores --gpus 4 --ntasks 4 --cpus-per-task 32 -C gpu}"
 
 # --- Script Execution ---

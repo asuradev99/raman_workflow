@@ -1,0 +1,100 @@
+"""I/O utilities: Tee, run_command, time formatting, exception hook."""
+
+import os
+import subprocess
+import sys
+import time
+import traceback
+
+
+class Tee:
+    """Duplicate all writes to the real stdout, a status file, and optionally a
+    full-output log file."""
+    def __init__(self, log_path, out_path=None):
+        self.log = open(log_path, "a")
+        self.out = open(out_path, "a") if out_path else None
+        self.stdout = sys.stdout
+
+    def write(self, data):
+        self.stdout.write(data)
+        self.log.write(data)
+        self.log.flush()
+        if self.out:
+            self.out.write(data)
+            self.out.flush()
+
+    def flush(self):
+        self.stdout.flush()
+        self.log.flush()
+        if self.out:
+            self.out.flush()
+
+    def close(self):
+        self.log.close()
+        if self.out:
+            self.out.close()
+
+
+def run_command(command, cwd=None, shell=True, check_success=True):
+    """
+    Executes a shell command.
+    Args:
+        command (str): The shell command to execute.
+        cwd (str, optional): The current working directory for the command.
+        shell (bool): Whether to use the shell. Defaults to True.
+        check_success (bool): If True, raises RuntimeError if command exits with non-zero code.
+    """
+    print(f"\n--- Running: {command} ---")
+    if cwd:
+        print(f"--- In directory: {cwd} ---")
+
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            shell=shell,
+            executable="/bin/bash",
+            text=True,
+        )
+        process.wait()
+
+        if check_success and process.returncode != 0:
+            raise RuntimeError(f"Command failed with exit code {process.returncode}: {command}")
+        print("--- Command completed successfully ---")
+    except Exception as e:
+        print(f"--- ERROR: {e} ---")
+        if check_success:
+            raise
+
+
+def fmt_time(ts):
+    """Format a Unix timestamp to a human-readable UTC string."""
+    return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(ts))
+
+
+def calc_duration(start_ts, end_ts):
+    """Calculate a human-readable duration between two Unix timestamps."""
+    secs = end_ts - start_ts
+    if secs < 60:
+        return f"{secs:.0f}s"
+    elif secs < 3600:
+        return f"{secs//60:.0f}m {secs%60:.0f}s"
+    else:
+        return f"{secs//3600:.0f}h {(secs%3600)//60:.0f}m"
+
+
+def make_pipeline_excepthook(status_file):
+    """Return a sys.excepthook that appends a formatted traceback to *status_file* on crash."""
+    def hook(exc_type, exc_value, exc_tb):
+        tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        print(tb_text, file=sys.stderr)
+        try:
+            with open(status_file, "a") as f:
+                f.write("\n" + "\u2501" * 78 + "\n")
+                f.write("  \u2717 UNHANDLED EXCEPTION \u2014 Full Traceback\n")
+                f.write("\u2501" * 78 + "\n")
+                f.write(tb_text)
+                f.write("\u2501" * 78 + "\n")
+        except Exception:
+            pass
+    return hook

@@ -24,6 +24,7 @@ set -euo pipefail
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+RAMAN_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # raman_workflow/ root
 DEFAULT_MATERIAL="hBN"
 RESTART_FLAG=""
 SCRATCH_FLAG="--scratch"
@@ -158,4 +159,4 @@ cd "$MATERIAL_DIR" || { echo "ERROR: Cannot cd to $MATERIAL_DIR"; exit 1; }
 echo "Working directory: $(pwd)"
 echo ""
 
-python "$SCRIPT_DIR/automation_raman_analysis.py" $RESTART_FLAG $SCRATCH_FLAG
+python "$RAMAN_DIR/automation_raman_analysis.py" $RESTART_FLAG $SCRATCH_FLAG
