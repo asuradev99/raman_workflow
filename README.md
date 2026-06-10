@@ -3,6 +3,9 @@
 Automated VASP + Phonopy pipeline for computing resonant Raman spectra of 2D
 materials on NERSC Perlmutter.
 
+Built using Fortran code by Dr. Liango Liang (ORNL) and Johnathan Kowalski (https://github.com/TheorySpectroPy/SpectroPy)
+
+
 ## Quick Start
 
 ```bash
