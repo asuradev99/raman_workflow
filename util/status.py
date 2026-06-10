@@ -78,7 +78,7 @@ def write_status(step, status, message="", *,
     else:
         overall_status = "RUNNING"
 
-    pipeline_start = STEP_HISTORY.get(3, {}).get("start_ts", now_ts)
+    pipeline_start = STEP_HISTORY.get(1, {}).get("start_ts", now_ts)
 
     def _dur(s, e):
         return calc_duration(s, e) if s and e else ""
@@ -179,8 +179,8 @@ def make_write_status(status_file, material_label, material_name, base_project_d
 def parse_resume_step(status_file, step_history, step_descriptions):
     """Parse the last status table in workflow.log to determine resume step."""
     if not os.path.exists(status_file):
-        print(f"[resume] No existing status file at {status_file}. Starting from step 3.")
-        return 3
+        print(f"[resume] No existing status file at {status_file}. Starting from step 1.")
+        return 1
 
     try:
         with open(status_file) as f:
@@ -188,8 +188,8 @@ def parse_resume_step(status_file, step_history, step_descriptions):
 
         table_starts = [i for i, c in enumerate(content) if c == '\u250c']
         if not table_starts:
-            print(f"[resume] No status table found in {status_file}. Starting from step 3.")
-            return 3
+            print(f"[resume] No status table found in {status_file}. Starting from step 1.")
+            return 1
 
         last_table_start = table_starts[-1]
         table_end = content.find('\u2514', last_table_start)
@@ -216,16 +216,16 @@ def parse_resume_step(status_file, step_history, step_descriptions):
 
             status_text = parts[3].strip().upper() if len(parts) > 3 else ""
 
-            if status_text == "DONE":
+            if status_text == "COMPLETED":
                 completed_steps.add(step_num)
                 step_history[step_num] = {
                     "status": "completed",
                     "start_ts": 0, "end_ts": 0,
                     "message": "Resumed — completed in previous run",
                 }
-            elif status_text == "ACTIVE":
+            elif status_text == "RUNNING":
                 running_step = step_num
-            elif status_text == "FAIL":
+            elif status_text == "FAILED":
                 failed_step = step_num
 
         if running_step is not None:
@@ -253,5 +253,5 @@ def parse_resume_step(status_file, step_history, step_descriptions):
 
     except Exception as e:
         print(f"[resume] Warning: Could not parse {status_file}: {e}")
-        print("[resume] Starting from step 3 (full pipeline).")
-        return 3
+        print("[resume] Starting from step 1 (full pipeline).")
+        return 1

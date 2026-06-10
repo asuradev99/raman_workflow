@@ -83,6 +83,30 @@ def calc_duration(start_ts, end_ts):
         return f"{secs//3600:.0f}h {(secs%3600)//60:.0f}m"
 
 
+def print_job_header(material_label, material_name, work_dir, status_file,
+                     scratch_flag, restart_flag, cpu_flag):
+    """Print a formatted job-start banner to stdout and the log."""
+    _now = time.strftime("%Y-%m-%d %H:%M:%S %Z")
+    _cmd = " ".join(sys.argv)
+    _node = os.uname().nodename
+    _sep = "\u2550" * 78
+    print(f"\n{_sep}")
+    print(f"  RAMAN PIPELINE START")
+    print(f"{_sep}")
+    print(f"  Date      : {_now}")
+    print(f"  Host      : {_node}")
+    print(f"  Material  : {material_label}  ({material_name})")
+    print(f"  Work dir  : {work_dir}")
+    print(f"  Log file  : {status_file}")
+    print(
+        f"  Flags     : scratch={'on' if scratch_flag else 'off'}  "
+        f"restart={'on' if restart_flag else 'off'}  "
+        f"cpu={'on' if cpu_flag else 'off'}"
+    )
+    print(f"  Command   : python {_cmd}")
+    print(f"{_sep}\n")
+
+
 def make_pipeline_excepthook(status_file):
     """Return a sys.excepthook that appends a formatted traceback to *status_file* on crash."""
     def hook(exc_type, exc_value, exc_tb):

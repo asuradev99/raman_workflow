@@ -1,7 +1,8 @@
-"""YAML config loading, merging, and srun-arg construction."""
+"""YAML config loading, merging, validation, and srun-arg construction."""
 
 import os
 import re
+import sys
 
 import yaml
 
@@ -65,6 +66,53 @@ def build_srun_args(config, cpu_flag=False):
                 f"-C {constraint}")
 
 
+# ── Required config keys (checked after loading) ──────────────────────────
+REQUIRED_CONFIG = {
+    "phonopy": ["dim", "amplitude", "band_path", "band_labels", "band_points"],
+    "scf_kpoints": ["mesh", "shift"],
+    "sup_relax_kpoints": ["mesh", "shift"],
+    "hf_kpoints": ["mesh", "shift"],
+    "raman_kpoints": ["mesh", "shift"],
+    "desired_energies": None,          # must exist, any value
+    "raman_tensor": ["incident_polarization", "scattered_polarization", "surface_normal"],
+    "vasp_loop": ["max_restarts"],
+    "eigenvectors_band": ["path", "labels", "points"],
+    "broadening": ["mode", "hwhm", "interpolation", "normalization"],
+    "vasp_srun": None,
+    "vasp_srun_cpu": None,
+    "incar_templates": ["relax", "dielec", "hf", "supercell_relax"],
+}
+
+
+def validate_config(config):
+    """Check that all required config keys are present.
+
+    Prints a clear error for each missing key and exits with code 1
+    if any are absent.  This replaces the old fallback-template approach
+    where missing keys were silently empty.
+    """
+    missing = []
+    for section, keys in REQUIRED_CONFIG.items():
+        if section not in config:
+            missing.append(f"  [{section}] section missing entirely")
+            continue
+        if keys is None:
+            continue  # just check existence, done above
+        for key in keys:
+            if key not in config[section]:
+                missing.append(f"  [{section}] -> '{key}' missing")
+
+    if missing:
+        print("ERROR: Required config key(s) missing:")
+        for m in missing:
+            print(m)
+        print()
+        print("Make sure both shared_workflow_settings.yaml and")
+        print("your per-material input/workflow_settings.yaml define all required keys.")
+        print("See raman_workflow/examples/ for a working template.")
+        sys.exit(1)
+
+
 def split_srun_args(srun_args, num_dirs):
     """Split an srun arg string into *num_dirs* proportional copies.
 
@@ -75,8 +123,8 @@ def split_srun_args(srun_args, num_dirs):
     if num_dirs < 1:
         return []
 
-    gpus_match = re.search(r'--gpus\s+(\d+)', srun_args)
-    ntasks_match = re.search(r'--ntasks\s+(\d+)', srun_args)
+    gpus_match = re.search(r'--gpus[=\s]+(\d+)', srun_args)
+    ntasks_match = re.search(r'--ntasks[=\s]+(\d+)', srun_args)
     if not gpus_match or not ntasks_match:
         return []
 
@@ -90,8 +138,8 @@ def split_srun_args(srun_args, num_dirs):
 
     result = []
     for _ in range(num_dirs):
-        args = re.sub(r'--gpus\s+\d+', f'--gpus {gpus_per}', srun_args)
-        args = re.sub(r'--ntasks\s+\d+', f'--ntasks {ntasks_per}', args)
+        args = re.sub(r'--gpus[=\s]+\d+', f'--gpus {gpus_per}', srun_args)
+        args = re.sub(r'--ntasks[=\s]+\d+', f'--ntasks {ntasks_per}', args)
         result.append(args)
 
     idle_gpus = total_gpus - (gpus_per * num_dirs)

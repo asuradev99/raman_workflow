@@ -131,18 +131,3 @@ Monitor: `tail -f queue.log` or `squeue -u $USER`.
 ```bash
 bash raman_workflow/scripts/show_status.sh $RAMAN_PROJECT_DIR/hBN_LDA/workflow.log
 ```
-
-## Key Features
-
-- **Resume support** — pipeline skips completed steps on rerun
-- **`--scratch` flag** — runs VASP I/O on `$SCRATCH` for speed, keeps config on HOME
-- **hf_parallel mode** — runs force-constant VASP directories concurrently
-- **start_from_supercell** — for materials that begin with a supercell (defect systems)
-- **YAML INCAR templates** — no flat INCAR files to manage
-
-## See Also
-
-- `CLAUDE.md` — detailed project documentation
-- `instructions.md` — tmux-based interactive workflow guide
-- `reports/tips.md` — known issues, fixes, and future improvements
-- `SpectroPy/` — portable Python post-processing toolkit

@@ -20,7 +20,7 @@
 #    Edit QUEUE_MATERIALS array below to set materials and walltimes.
 # =============================================================================
 
-set -uo pipefail
+set -euo pipefail
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  QUEUE CONFIGURATION — edit this section
@@ -256,6 +256,7 @@ echo ""
 echo "=== Pipeline starting at \$(date) ==="
 echo "Flags: ${PIPELINE_FLAGS}"
 cd "${MATERIAL_DIR}"
+export PYTHONPATH="${RAMAN_DIR}:\${PYTHONPATH:-}"
 python "${RAMAN_DIR}/src/automation_raman_analysis.py" ${PIPELINE_FLAGS}
 PIPELINE_EXIT=\$?
 echo ""

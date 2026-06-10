@@ -54,7 +54,7 @@ def update_chgcar_symlinks(hffiles_dir, source_subdir="groundstate"):
         rel_target = "../groundstate/CHGCAR"
         src_path = os.path.join(hffiles_dir, "groundstate", "CHGCAR")
 
-    if not os.path.exists(src_path) and not os.path.islink(src_path):
+    if not os.path.exists(src_path):
         print(f"  WARNING: {src_path} not found — displacement runs will start without charge-density seeding")
         return 0
 

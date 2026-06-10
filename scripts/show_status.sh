@@ -15,5 +15,6 @@ if [ ! -f "$LOG" ]; then
 fi
 
 # Extract the last status block: reverse the file, grab lines up to the
-# second ━━━ delimiter (the block header), then reverse back.
-tac "$LOG" | awk '/^━/{if(++n==2)exit} {print}' | tac
+# 5th ━━━ delimiter (each block has 4 ━ lines; the 5th in reversed order is
+# the end of the preceding block), then reverse back.
+tac "$LOG" | awk '/^━/{if(++n==5)exit} {print}' | tac

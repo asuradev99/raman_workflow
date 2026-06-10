@@ -8,10 +8,11 @@ from util.status import print_step_header, print_step_result
 
 
 def run(ctx):
-    ws = ctx["write_status"]
-    print_step_header(1)
-    ws(1, "running", "Initial VASP relaxation")
-    _t0 = time.time()
+    write_status = ctx["write_status"]
+    step = ctx["_step"]
+    print_step_header(step)
+    write_status(step, "running", "Initial VASP relaxation")
+    t_start = time.time()
 
     scf_dir = os.path.join(ctx["work_dir"], "scf")
     run_command(f"mkdir -p {scf_dir}", cwd=ctx["work_dir"])
@@ -39,9 +40,9 @@ def run(ctx):
     ):
         msg = f"VASP relaxation failed after max retries in {scf_dir}. Check {scf_dir}/relaxation.stdout."
         print_step_result(
-            1, ok=False, duration_s=time.time() - _t0, message="Relaxation failed"
+            step, ok=False, duration_s=time.time() - t_start, message="Relaxation failed"
         )
         raise RuntimeError(msg)
 
-    ws(1, "completed", "Initial VASP relaxation finished")
-    print_step_result(1, ok=True, duration_s=time.time() - _t0)
+    write_status(step, "completed", "Initial VASP relaxation finished")
+    print_step_result(step, ok=True, duration_s=time.time() - t_start)

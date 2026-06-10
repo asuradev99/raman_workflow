@@ -272,6 +272,41 @@ def check_vasp_convergence(outcar_dir, stage_label=""):
               f"(no convergence signal found).")
 
 
+def _has_zbrent_error(stdout_path):
+    """Return True if relaxation.stdout contains a ZBRENT fatal error."""
+    if not os.path.exists(stdout_path):
+        return False
+    try:
+        with open(stdout_path) as f:
+            return "ZBRENT: fatal error in bracketing" in f.read()
+    except OSError:
+        return False
+
+
+def _extract_max_force(outcar_path):
+    """Return max force magnitude (eV/Å) from the last ionic step in OUTCAR, or None."""
+    if not os.path.exists(outcar_path):
+        return None
+    try:
+        with open(outcar_path) as f:
+            content = f.read()
+        blocks = re.findall(
+            r"TOTAL-FORCE \(eV/Angst\)\n\s*-+\n(.*?)\n\s*-+",
+            content, re.DOTALL
+        )
+        if not blocks:
+            return None
+        lines = [l.split() for l in blocks[-1].strip().split("\n") if len(l.split()) >= 6]
+        if not lines:
+            return None
+        return max(
+            (float(p[3])**2 + float(p[4])**2 + float(p[5])**2)**0.5
+            for p in lines
+        )
+    except Exception:
+        return None
+
+
 def check_dielectric_complete(dirpath, stage_label=""):
     """Verify that a LOPTICS run wrote non-zero dielectric tensor data."""
     if not _PY4VASP or not _h5_path(dirpath):

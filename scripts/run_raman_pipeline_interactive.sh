@@ -159,4 +159,5 @@ cd "$MATERIAL_DIR" || { echo "ERROR: Cannot cd to $MATERIAL_DIR"; exit 1; }
 echo "Working directory: $(pwd)"
 echo ""
 
+export PYTHONPATH="$RAMAN_DIR:${PYTHONPATH:-}"
 python "$RAMAN_DIR/src/automation_raman_analysis.py" $RESTART_FLAG $SCRATCH_FLAG

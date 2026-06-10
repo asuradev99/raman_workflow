@@ -143,6 +143,7 @@ echo "Working directory: $(pwd)"
 # via write_status() calls at each step. This wrapper only writes the
 # initial header (above) and final cleanup (trap).
 
+export PYTHONPATH="$PIPELINE_DIR:${PYTHONPATH:-}"
 echo "Running: python $AUTOMATION_SCRIPT $RESTART_FLAG $CPU_FLAG $SCRATCH_FLAG"
 python "$AUTOMATION_SCRIPT" $RESTART_FLAG $CPU_FLAG $SCRATCH_FLAG
 

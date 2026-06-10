@@ -6,60 +6,61 @@ from util.kpoints import write_kpoints
 from util.status import print_step_header, print_step_result
 
 def run(ctx):
-    ws = ctx["write_status"]
-    W = ctx["work_dir"]
-    R = ctx["raman_dir"]
-    BU = ctx["binary_utilities_dir"]
-    CF = ctx["cpu_flag"]
+    write_status = ctx["write_status"]
+    step = ctx["_step"]
+    work_dir = ctx["work_dir"]
+    raman_dir = ctx["raman_dir"]
+    bin_dir = ctx["binary_utilities_dir"]
+    is_cpu = ctx["cpu_flag"]
 
-    print_step_header(6)
-    ws(6, "running", "Raman setup + displacement generation")
-    _t0 = time.time()
+    print_step_header(step)
+    write_status(step, "running", "Raman setup + displacement generation")
+    t_start = time.time()
 
     # Copy CONTCAR + VASP inputs to raman/
-    run_command(f"mkdir -p {R}", cwd=W)
-    run_command(f"cp scf/CONTCAR {R}/CONTCAR", cwd=W)
+    run_command(f"mkdir -p {raman_dir}", cwd=work_dir)
+    run_command(f"cp scf/CONTCAR {raman_dir}/CONTCAR", cwd=work_dir)
     for f in ("CHGCAR", "WAVECAR"):
-        src = os.path.join(W, "scf", f)
-        dst = os.path.join(R, f)
+        src = os.path.join(work_dir, "scf", f)
+        dst = os.path.join(raman_dir, f)
         if os.path.exists(src):
             os.symlink(src, dst)
         else:
             print(f"  [setup] WARNING: {f} not found in scf/")
-    write_incar(os.path.join(R, "INCAR"), ctx["config"], "dielec")
-    write_kpoints(os.path.join(R, "KPOINTS"), "K-points for resonant Raman",
+    write_incar(os.path.join(raman_dir, "INCAR"), ctx["config"], "dielec")
+    write_kpoints(os.path.join(raman_dir, "KPOINTS"), "K-points for resonant Raman",
                   ctx["raman_kpoints_mesh"], ctx["raman_kpoints_shift"])
-    run_command(f"cp input/POTCAR {R}/", cwd=W)
+    run_command(f"cp input/POTCAR {raman_dir}/", cwd=work_dir)
 
     # Navigate to raman/
-    os.chdir(R)
+    os.chdir(raman_dir)
 
     # Raman displacements
     for b in ("ramdiscar", "genRApos610", "runRA"):
-        p = os.path.join(BU, b)
+        p = os.path.join(bin_dir, b)
         if not os.path.exists(p):
             raise FileNotFoundError(f"{b} not found at {p}")
-    run_command(f"{BU}/ramdiscar", check_success=not CF)
-    gf = os.path.join(R, ".go_input")
-    with open(gf, "w") as f:
+    run_command(f"{bin_dir}/ramdiscar", check_success=not is_cpu)
+    go_input = os.path.join(raman_dir, ".go_input")
+    with open(go_input, "w") as f:
         f.write("go\n")
-    run_command(f"{BU}/genRApos610 < {gf}", check_success=not CF)
-    os.remove(gf)
-    run_command(f"{BU}/runRA")
+    run_command(f"{bin_dir}/genRApos610 < {go_input}", check_success=not is_cpu)
+    os.remove(go_input)
+    run_command(f"{bin_dir}/runRA")
 
     # Propagate CHGCAR/WAVECAR symlinks into ra_pos_* dirs
-    cs = os.path.join(W, "scf", "CHGCAR")
-    ws2 = os.path.join(W, "scf", "WAVECAR")
-    cnt = 0
-    for d in sorted(glob.glob(os.path.join(R, "ra_pos_*"))):
-        for fn, sp in [("CHGCAR", cs), ("WAVECAR", ws2)]:
+    chgcar_src = os.path.join(work_dir, "scf", "CHGCAR")
+    wavecar_src = os.path.join(work_dir, "scf", "WAVECAR")
+    symlink_count = 0
+    for d in sorted(glob.glob(os.path.join(raman_dir, "ra_pos_*"))):
+        for fn, sp in [("CHGCAR", chgcar_src), ("WAVECAR", wavecar_src)]:
             dst = os.path.join(d, fn)
             if os.path.exists(sp) and not os.path.exists(dst):
                 os.symlink(sp, dst)
-                cnt += 1
-    n = len(glob.glob(os.path.join(R, "ra_pos_*")))
-    if cnt:
-        print(f"  [setup] Created {cnt} symlinks across {n} ra_pos_* dirs")
+                symlink_count += 1
+    num_dirs = len(glob.glob(os.path.join(raman_dir, "ra_pos_*")))
+    if symlink_count:
+        print(f"  [setup] Created {symlink_count} symlinks across {num_dirs} ra_pos_* dirs")
 
-    ws(6, "completed", "Raman setup + displacements done")
-    print_step_result(6, ok=True, duration_s=time.time() - _t0)
+    write_status(step, "completed", "Raman setup + displacements done")
+    print_step_result(step, ok=True, duration_s=time.time() - t_start)

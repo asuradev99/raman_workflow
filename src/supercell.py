@@ -13,51 +13,52 @@ from util.status import print_step_header, print_step_result
 
 
 def run(ctx):
-    ws = ctx["write_status"]
-    H = ctx["hffiles_dir"]
-    W = ctx["work_dir"]
-    print_step_header(2)
-    ws(2, "running", "Supercell generation + ionic relaxation")
-    _t0 = time.time()
-    gs = os.path.join(H, "groundstate")
-    run_command(f"mkdir -p {gs}", cwd=W)
+    write_status = ctx["write_status"]
+    step = ctx["_step"]
+    hf_dir = ctx["hffiles_dir"]
+    work_dir = ctx["work_dir"]
+    print_step_header(step)
+    write_status(step, "running", "Supercell generation + ionic relaxation")
+    t_start = time.time()
+    gs_dir = os.path.join(hf_dir, "groundstate")
+    run_command(f"mkdir -p {gs_dir}", cwd=work_dir)
     print("  [setup] Creating supercell in hf/ via phonopy...")
-    run_command(f"cp scf/CONTCAR {H}/POSCAR_unitcell", cwd=W)
-    check_no_selective_dynamics(os.path.join(H, "POSCAR_unitcell"), "POSCAR_unitcell")
+    run_command(f"cp scf/CONTCAR {hf_dir}/POSCAR_unitcell", cwd=work_dir)
+    check_no_selective_dynamics(os.path.join(hf_dir, "POSCAR_unitcell"), "POSCAR_unitcell")
     run_command(
         f'phonopy -d --dim="{ctx["phonopy_dim"]}" --amplitude={ctx["phonopy_amplitude"]} -c POSCAR_unitcell',
-        cwd=H,
+        cwd=hf_dir,
     )
-    sp = os.path.join(H, "SPOSCAR")
-    if not os.path.exists(sp):
-        raise FileNotFoundError(f"SPOSCAR not found in {H}")
-    run_command(f"cp SPOSCAR {gs}/POSCAR", cwd=H)
+    spos_path = os.path.join(hf_dir, "SPOSCAR")
+    if not os.path.exists(spos_path):
+        raise FileNotFoundError(f"SPOSCAR not found in {hf_dir}")
+    run_command(f"cp SPOSCAR {gs_dir}/POSCAR", cwd=hf_dir)
     print("  [setup] POSCAR-* + SPOSCAR in hf/")
     if not ctx["start_from_supercell"]:
         print("  [vasp] Supercell ionic relaxation...")
-        write_incar(os.path.join(gs, "INCAR"), ctx["config"], "supercell_relax")
+        write_incar(os.path.join(gs_dir, "INCAR"), ctx["config"], "supercell_relax")
         write_kpoints(
-            os.path.join(gs, "KPOINTS"),
+            os.path.join(gs_dir, "KPOINTS"),
             "K-points for supercell",
             ctx["sup_relax_kpoints_mesh"],
             ctx["sup_relax_kpoints_shift"],
         )
-        run_command(f"cp input/POTCAR {gs}/", cwd=W)
+        run_command(f"cp input/POTCAR {gs_dir}/", cwd=work_dir)
         run_command(
             f"srun {ctx['srun_args']} {ctx['vasp_binary']} > supercell_relax.stdout",
-            cwd=gs,
+            cwd=gs_dir,
             check_success=False,
         )
-        check_vasp_convergence(gs, "step-2")
-        n = count_ionic_steps(gs)
+        check_vasp_convergence(gs_dir, "step-2")
+        n = count_ionic_steps(gs_dir)
         if n and n >= 100:
             print("  WARNING: Supercell relaxation reached NSW=100 limit")
-    run_command(f"cp SPOSCAR {H}/CONTCAR_supercell_relaxed", cwd=H)
-    run_command(f"cp SPOSCAR {H}/CONTCAR", cwd=H)
+    run_command(f"cp SPOSCAR {hf_dir}/CONTCAR_supercell_relaxed", cwd=hf_dir)
+    run_command(f"cp SPOSCAR {hf_dir}/CONTCAR", cwd=hf_dir)
     if not ctx["start_from_supercell"]:
-        run_command(f"cp CONTCAR {gs}/CONTCAR_relaxed", cwd=gs, check_success=False)
+        run_command(f"cp CONTCAR {gs_dir}/CONTCAR_relaxed", cwd=gs_dir, check_success=False)
     if ctx["start_from_supercell"]:
-        ws(2, "completed", "Supercell displacements (relaxation skipped)")
+        write_status(step, "completed", "Supercell displacements (relaxation skipped)")
     else:
-        ws(2, "completed", "Supercell relaxed — CHGCAR/WAVECAR in hf/groundstate/")
-    print_step_result(2, ok=True, duration_s=time.time() - _t0)
+        write_status(step, "completed", "Supercell relaxed — CHGCAR/WAVECAR in hf/groundstate/")
+    print_step_result(step, ok=True, duration_s=time.time() - t_start)

@@ -5,158 +5,159 @@ from util.postproc import generate_kopia_script, inject_ramfile_energies
 from util.status import print_step_header, print_step_result
 
 def run(ctx):
-    ws = ctx["write_status"]
-    R = ctx["raman_dir"]
-    BU = ctx["binary_utilities_dir"]
-    CF = ctx["cpu_flag"]
-    DE = ctx["desired_energies"]
-    W = ctx["work_dir"]
-    M = ctx["material_dir"]
-    SF = ctx["scratch_flag"]
-    SD = ctx["script_dir"]
-    C = ctx["config"]
-    H = ctx["hffiles_dir"]
+    write_status = ctx["write_status"]
+    step = ctx["_step"]
+    raman_dir = ctx["raman_dir"]
+    bin_dir = ctx["binary_utilities_dir"]
+    is_cpu = ctx["cpu_flag"]
+    energies = ctx["desired_energies"]
+    work_dir = ctx["work_dir"]
+    material_dir = ctx["material_dir"]
+    use_scratch = ctx["scratch_flag"]
+    script_dir = ctx["script_dir"]
+    config = ctx["config"]
+    hf_dir = ctx["hffiles_dir"]
 
-    print_step_header(8)
-    ws(8, "running", "Post-processing")
-    _t0 = time.time()
+    print_step_header(step)
+    write_status(step, "running", "Post-processing")
+    t_start = time.time()
 
     # ── Kopia ─────────────────────────────────────────────────────────
-    ra = sorted(glob.glob(os.path.join(R, "ra_pos_*")))
-    if not ra:
+    ra_dirs = sorted(glob.glob(os.path.join(raman_dir, "ra_pos_*")))
+    if not ra_dirs:
         raise RuntimeError("No ra_pos_* directories found")
-    generate_kopia_script(R, ra)
-    ax = os.path.join(R, "AXML")
-    if not os.path.isdir(ax):
+    generate_kopia_script(raman_dir, ra_dirs)
+    axml_dir = os.path.join(raman_dir, "AXML")
+    if not os.path.isdir(axml_dir):
         raise RuntimeError("AXML/ not created")
-    af = [f for f in os.listdir(ax) if f.endswith(".xml")]
-    if not af:
+    xml_files = [f for f in os.listdir(axml_dir) if f.endswith(".xml")]
+    if not xml_files:
         raise RuntimeError("AXML/ empty")
-    empty = [f for f in af if os.path.getsize(os.path.join(ax, f)) == 0]
-    if empty:
-        raise RuntimeError(f"{len(empty)} empty XML files")
-    print(f"  [verify] AXML/ contains {len(af)} valid XML files")
+    empty_xml = [f for f in xml_files if os.path.getsize(os.path.join(axml_dir, f)) == 0]
+    if empty_xml:
+        raise RuntimeError(f"{len(empty_xml)} empty XML files")
+    print(f"  [verify] AXML/ contains {len(xml_files)} valid XML files")
 
     # ── RAMFILE ───────────────────────────────────────────────────────
-    src = os.path.join(BU, "ramfile_dynamic.sh")
-    if not os.path.exists(src):
-        raise RuntimeError(f"ramfile_dynamic.sh not found at {src}")
-    sr = os.path.join(R, "store_ramfile")
-    se = os.path.join(R, "store_epsilon")
-    os.makedirs(sr, exist_ok=True)
-    os.makedirs(se, exist_ok=True)
-    dst = os.path.join(R, "ramfile_dynamic.sh")
-    inject_ramfile_energies(src, dst, DE)
-    run_command(f"export PATH={BU}:$PATH && bash ramfile_dynamic.sh", cwd=R)
-    for e in DE:
-        if not os.path.exists(os.path.join(sr, f"RAMFILE_{e}")):
+    ramfile_src = os.path.join(bin_dir, "ramfile_dynamic.sh")
+    if not os.path.exists(ramfile_src):
+        raise RuntimeError(f"ramfile_dynamic.sh not found at {ramfile_src}")
+    store_ramfile = os.path.join(raman_dir, "store_ramfile")
+    store_epsilon = os.path.join(raman_dir, "store_epsilon")
+    os.makedirs(store_ramfile, exist_ok=True)
+    os.makedirs(store_epsilon, exist_ok=True)
+    ramfile_dst = os.path.join(raman_dir, "ramfile_dynamic.sh")
+    inject_ramfile_energies(ramfile_src, ramfile_dst, energies)
+    run_command(f"export PATH={bin_dir}:$PATH && bash ramfile_dynamic.sh", cwd=raman_dir)
+    for e in energies:
+        if not os.path.exists(os.path.join(store_ramfile, f"RAMFILE_{e}")):
             raise RuntimeError(f"RAMFILE_{e} not produced")
 
     # ── Static copy to output/ ────────────────────────────────────────
-    run_command(f"cp {H}/band.yaml .", cwd=R, check_success=False)
-    run_command(f"cp {H}/irreps.yaml .", cwd=R, check_success=False)
-    od = os.path.join(W, "output")
-    run_command(f"mkdir -p {od}", cwd=W)
-    for sb in ("band.yaml", "irreps.yaml", "POSCAR_unitcell", "SPOSCAR",
-               "FORCE_SETS", "phonopy.yaml", "CONTCAR",
-               "eigenvectors.conf", "symmetry.conf"):
-        s = os.path.join(H, sb)
-        if os.path.exists(s) and os.path.getsize(s) > 0:
-            run_command(f"cp {s} {od}/", cwd=W, check_success=False)
-    for a in [os.path.join(H, "all_mode.txt")] + glob.glob(os.path.join(H, "mode*")):
-        if os.path.exists(a) and os.path.getsize(a) > 0:
-            run_command(f"cp {a} {od}/", cwd=W, check_success=False)
-    idd = os.path.join(od, "incar")
-    run_command(f"mkdir -p {idd}", cwd=W)
+    run_command(f"cp {hf_dir}/band.yaml .", cwd=raman_dir, check_success=False)
+    run_command(f"cp {hf_dir}/irreps.yaml .", cwd=raman_dir, check_success=False)
+    output_dir = os.path.join(work_dir, "output")
+    run_command(f"mkdir -p {output_dir}", cwd=work_dir)
+    for filename in ("band.yaml", "irreps.yaml", "POSCAR_unitcell", "SPOSCAR",
+                     "FORCE_SETS", "phonopy.yaml", "CONTCAR",
+                     "eigenvectors.conf", "symmetry.conf"):
+        src_path = os.path.join(hf_dir, filename)
+        if os.path.exists(src_path) and os.path.getsize(src_path) > 0:
+            run_command(f"cp {src_path} {output_dir}/", cwd=work_dir, check_success=False)
+    for mode_file in [os.path.join(hf_dir, "all_mode.txt")] + glob.glob(os.path.join(hf_dir, "mode*")):
+        if os.path.exists(mode_file) and os.path.getsize(mode_file) > 0:
+            run_command(f"cp {mode_file} {output_dir}/", cwd=work_dir, check_success=False)
+    incar_dir = os.path.join(output_dir, "incar")
+    run_command(f"mkdir -p {incar_dir}", cwd=work_dir)
     incar_pairs = [
-        (os.path.join(W, "scf", "INCAR"), "relax.incar"),
-        (os.path.join(H, "groundstate", "INCAR"), "supercell_relax.incar"),
-        (os.path.join(H, "INCAR"), "hf_force_constants.incar"),
-        (os.path.join(R, "INCAR"), "dielec_raman.incar"),
+        (os.path.join(work_dir, "scf", "INCAR"), "relax.incar"),
+        (os.path.join(hf_dir, "groundstate", "INCAR"), "supercell_relax.incar"),
+        (os.path.join(hf_dir, "INCAR"), "hf_force_constants.incar"),
+        (os.path.join(raman_dir, "INCAR"), "dielec_raman.incar"),
     ]
-    for s, dn in incar_pairs:
-        if os.path.exists(s) and os.path.getsize(s) > 0:
-            shutil.copy2(s, os.path.join(idd, dn))
+    for src_path, dest_name in incar_pairs:
+        if os.path.exists(src_path) and os.path.getsize(src_path) > 0:
+            shutil.copy2(src_path, os.path.join(incar_dir, dest_name))
 
     # ── Energy loop (raman_tensor + broadening) ───────────────────────
-    for b in ("raman_tensor", "broadening"):
-        if not os.path.exists(os.path.join(BU, b)):
-            raise FileNotFoundError(f"{b} not found")
-    for e in DE:
-        if not os.path.exists(os.path.join(sr, f"RAMFILE_{e}")):
+    for binary in ("raman_tensor", "broadening"):
+        if not os.path.exists(os.path.join(bin_dir, binary)):
+            raise FileNotFoundError(f"{binary} not found")
+    for e in energies:
+        if not os.path.exists(os.path.join(store_ramfile, f"RAMFILE_{e}")):
             raise RuntimeError(f"RAMFILE_{e} not found")
-    for e in DE:
+    for e in energies:
         print(f"\n  [energy] Processing {e} eV —")
-        run_command("rm -f RAMFILE", cwd=R, check_success=False)
-        run_command(f"cp store_ramfile/RAMFILE_{e} RAMFILE", cwd=R)
-        ri = f"{ctx['raman_incident_pol']}\n{ctx['raman_scattered_pol']}\n{ctx['raman_surface_normal']}\n"
-        rf = os.path.join(R, ".raman_tensor_input")
-        with open(rf, "w") as f:
-            f.write(ri)
-        run_command(f"{BU}/raman_tensor < .raman_tensor_input > /dev/null",
-                    cwd=R, check_success=not CF)
-        os.remove(rf)
-        _b = C.get("broadening", {})
-        bi = os.path.join(R, "broadening_input")
+        run_command("rm -f RAMFILE", cwd=raman_dir, check_success=False)
+        run_command(f"cp store_ramfile/RAMFILE_{e} RAMFILE", cwd=raman_dir)
+        raman_input = f"{ctx['raman_incident_pol']}\n{ctx['raman_scattered_pol']}\n{ctx['raman_surface_normal']}\n"
+        input_file = os.path.join(raman_dir, ".raman_tensor_input")
+        with open(input_file, "w") as f:
+            f.write(raman_input)
+        run_command(f"{bin_dir}/raman_tensor < .raman_tensor_input > /dev/null",
+                    cwd=raman_dir, check_success=not is_cpu)
+        os.remove(input_file)
+        broadening_cfg = config.get("broadening", {})
+        broadening_file = os.path.join(raman_dir, "broadening_input")
         b_content = (
             f"Raman_intensity_complex  !!! the file name\n"
-            f"{int(_b.get('mode', 2))}            !!! peak broadening mode\n"
-            f"{int(_b.get('hwhm', 1))}            !!! half width at half maximum (cm-1)\n"
-            f"{int(_b.get('interpolation', 200))}  !!! interpolation points\n"
-            f"{int(_b.get('normalization', 2))}    !!! normalization\n"
+            f"{int(broadening_cfg.get('mode', 2))}            !!! peak broadening mode\n"
+            f"{int(broadening_cfg.get('hwhm', 1))}            !!! half width at half maximum (cm-1)\n"
+            f"{int(broadening_cfg.get('interpolation', 200))}  !!! interpolation points\n"
+            f"{int(broadening_cfg.get('normalization', 2))}    !!! normalization\n"
         )
-        with open(bi, "w") as f:
+        with open(broadening_file, "w") as f:
             f.write(b_content)
-        run_command(f"{BU}/broadening", cwd=R)
-        rp1 = os.path.join(R, "Raman_intensity_complex")
-        rp2 = os.path.join(R, "Raman_intensity_complex_broadening")
-        if os.path.exists(rp1):
-            run_command(f"mv Raman_intensity_complex Raman_intensity_complex_{e}eV", cwd=R)
-        if os.path.exists(rp2):
-            run_command(f"mv Raman_intensity_complex_broadening Raman_intensity_complex_broadening_{e}eV", cwd=R)
+        run_command(f"{bin_dir}/broadening", cwd=raman_dir)
+        raman_raw = os.path.join(raman_dir, "Raman_intensity_complex")
+        raman_broad = os.path.join(raman_dir, "Raman_intensity_complex_broadening")
+        if os.path.exists(raman_raw):
+            run_command(f"mv Raman_intensity_complex Raman_intensity_complex_{e}eV", cwd=raman_dir)
+        if os.path.exists(raman_broad):
+            run_command(f"mv Raman_intensity_complex_broadening Raman_intensity_complex_broadening_{e}eV", cwd=raman_dir)
 
     # ── SpectroPy plots ───────────────────────────────────────────────
-    sp = os.path.normpath(os.path.join(SD, "..", "SpectroPy"))
-    gp = os.path.join(sp, "generate_raman_plots.py")
-    for e in DE:
-        el = f"{e}eV"
-        ed = os.path.join(R, el)
-        os.makedirs(ed, exist_ok=True)
-        sf = os.path.join(R, f"Raman_intensity_complex_{el}")
-        if os.path.exists(sf):
-            with open(os.path.join(ed, "Raman_intensity_specific.dat"), "w") as f:
+    spectropy_dir = os.path.normpath(os.path.join(script_dir, "..", "..", "SpectroPy"))
+    plot_script = os.path.join(spectropy_dir, "generate_raman_plots.py")
+    for e in energies:
+        label = f"{e}eV"
+        energy_dir = os.path.join(raman_dir, label)
+        os.makedirs(energy_dir, exist_ok=True)
+        raman_file = os.path.join(raman_dir, f"Raman_intensity_complex_{label}")
+        if os.path.exists(raman_file):
+            with open(os.path.join(energy_dir, "Raman_intensity_specific.dat"), "w") as f:
                 f.write("# Freq(cm-1)   Intensity(arb.)   Irrep.\n")
-                with open(sf) as src:
+                with open(raman_file) as src:
                     f.write(src.read())
-    if os.path.exists(gp):
-        run_command(f"echo -e '5.0\\nl' | python3 {gp}", cwd=R, check_success=False)
+    if os.path.exists(plot_script):
+        run_command(f"echo -e '5.0\\nl' | python3 {plot_script}", cwd=raman_dir, check_success=False)
     else:
         print("WARNING: SpectroPy plotter not found")
 
     # ── Aggregate output ──────────────────────────────────────────────
-    rp = os.path.join(od, "raman_spectra")
-    rd = os.path.join(od, "raman_data")
-    os.makedirs(rp, exist_ok=True)
-    os.makedirs(rd, exist_ok=True)
-    for e in DE:
-        el = f"{e}eV"
-        ps = os.path.join(R, el, "Raman_plot_styled.png")
-        if os.path.exists(ps):
-            shutil.copy2(ps, os.path.join(rp, f"{el}.png"))
-    for pat in ("Raman_intensity_complex_*eV", "Raman_intensity_complex_broadening_*eV"):
-        for f in glob.glob(os.path.join(R, pat)):
-            shutil.copy2(f, os.path.join(rd, os.path.basename(f)))
+    png_dir = os.path.join(output_dir, "raman_spectra")
+    data_dir = os.path.join(output_dir, "raman_data")
+    os.makedirs(png_dir, exist_ok=True)
+    os.makedirs(data_dir, exist_ok=True)
+    for e in energies:
+        label = f"{e}eV"
+        png_src = os.path.join(raman_dir, label, "Raman_plot_styled.png")
+        if os.path.exists(png_src):
+            shutil.copy2(png_src, os.path.join(png_dir, f"{label}.png"))
+    for glob_pat in ("Raman_intensity_complex_*eV", "Raman_intensity_complex_broadening_*eV"):
+        for f in glob.glob(os.path.join(raman_dir, glob_pat)):
+            shutil.copy2(f, os.path.join(data_dir, os.path.basename(f)))
 
-    ws("final", "completed", "Automation workflow complete")
+    write_status("final", "completed", "Automation workflow complete")
 
     # ── --scratch: copy output/ from WORK_DIR to HOME ─────────────────
-    if SF:
-        ho = os.path.join(M, "output")
-        so = os.path.join(W, "output")
-        if os.path.exists(so):
-            run_command(f"mkdir -p {ho}", cwd=M)
-            run_command(f"cp -r {so}/* {ho}/", cwd=M, check_success=False)
-            print(f"\n  [scratch] Results saved to: {ho}")
+    if use_scratch:
+        home_output = os.path.join(material_dir, "output")
+        scratch_output = os.path.join(work_dir, "output")
+        if os.path.exists(scratch_output):
+            run_command(f"mkdir -p {home_output}", cwd=material_dir)
+            run_command(f"cp -r {scratch_output}/* {home_output}/", cwd=material_dir, check_success=False)
+            print(f"\n  [scratch] Results saved to: {home_output}")
 
-    ws(8, "completed", "Post-processing done")
-    print_step_result(8, ok=True, duration_s=time.time() - _t0)
+    write_status(step, "completed", "Post-processing done")
+    print_step_result(step, ok=True, duration_s=time.time() - t_start)
