@@ -222,6 +222,12 @@ def check_vasp_convergence(outcar_dir, stage_label=""):
                   f"(worst atom: {atom_labels[max_idx]})")
 
             _print_force_table(prefix, f_last, f_mags, atom_labels, max_idx, max_f)
+
+            if not converged:
+                raise RuntimeError(
+                    f"{prefix} VASP not converged — max |F| = {max_f:.6f} eV/Å "
+                    f"> EDIFFG = {tol} after {n_steps}/{nsw} steps. NSW may be too small."
+                )
             return
 
         except RuntimeError:
@@ -242,34 +248,31 @@ def check_vasp_convergence(outcar_dir, stage_label=""):
         content = f.read()
     if "General timing and accounting" not in content:
         stdout_path = os.path.join(outcar_dir, "relaxation.stdout")
-        if os.path.exists(stdout_path):
-            with open(stdout_path) as _f:
-                if "ZBRENT: fatal error in bracketing" in _f.read():
-                    blocks = re.findall(
-                        r"TOTAL-FORCE \(eV/Angst\)\n\s*-+\n(.*?)\n\s*-+",
-                        content, re.DOTALL
-                    )
-                    if blocks:
-                        lines = [l.split() for l in
-                                 blocks[-1].strip().split("\n")
-                                 if len(l.split()) >= 6]
-                        max_f = max(
-                            (float(p[3])**2 + float(p[4])**2 + float(p[5])**2)**0.5
-                            for p in lines
-                        )
-                        if max_f < 0.01:
-                            print(f"{prefix} ZBRENT error — forces converged "
-                                  f"(max |F| = {max_f:.6f} eV/Å). Continuing.")
-                            return
+        if _has_zbrent_error(stdout_path):
+            max_f = _extract_max_force(outcar_path)
+            if max_f is not None and max_f < 0.01:
+                print(f"{prefix} ZBRENT error — forces converged "
+                      f"(max |F| = {max_f:.6f} eV/Å). Continuing.")
+                return
         raise RuntimeError(
             f"{prefix} VASP did not complete normally "
             f"(no 'General timing and accounting' footer in OUTCAR)."
         )
-    if "reached required accuracy" in content or "aborting loop because EDIFF is reached" in content:
-        print(f"{prefix} VASP converged successfully")
+    if "reached required accuracy" in content:
+        print(f"{prefix} VASP converged successfully (ionic)")
+    elif "aborting loop because EDIFF is reached" in content:
+        print(f"{prefix} WARNING: electronic convergence only — "
+              f"VASP may not be ionically converged.")
+        raise RuntimeError(
+            f"{prefix} VASP stopped: electronic convergence but no ionic convergence signal. "
+            f"NSW may be too small or EDIFFG too tight."
+        )
     else:
         print(f"{prefix} WARNING: VASP did NOT reach convergence "
               f"(no convergence signal found).")
+        raise RuntimeError(
+            f"{prefix} VASP did not reach convergence — no convergence signal in OUTCAR."
+        )
 
 
 def _has_zbrent_error(stdout_path):

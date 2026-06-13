@@ -11,6 +11,28 @@ from .vasp import is_calculation_complete
 from .config import split_srun_args
 
 
+HF_DIR_PREFIX = "hf_POSCAR-"
+
+
+def list_hf_dirs(hffiles_dir, include_groundstate=False):
+    """Return sorted absolute paths of hf_POSCAR-* dirs in *hffiles_dir*.
+
+    Args:
+        hffiles_dir: Path to the hf/ directory.
+        include_groundstate: If True, prepend the groundstate/ dir when present.
+    """
+    dirs = sorted(
+        os.path.join(hffiles_dir, d)
+        for d in os.listdir(hffiles_dir)
+        if d.startswith(HF_DIR_PREFIX) and os.path.isdir(os.path.join(hffiles_dir, d))
+    )
+    if include_groundstate:
+        gs = os.path.join(hffiles_dir, "groundstate")
+        if os.path.isdir(gs):
+            dirs.insert(0, gs)
+    return dirs
+
+
 def run_hf_loop(hffiles_dir, vasp_script_path, max_restarts,
                 srun_args, vasp_binary,
                 cpu_flag=False, hf_parallel=False):
@@ -22,30 +44,21 @@ def run_hf_loop(hffiles_dir, vasp_script_path, max_restarts,
     for i in range(max_restarts):
         print(f"\n--- Running VASP iteration {i+1}/{max_restarts} ---")
 
-        all_hf = sorted(
-            d for d in os.listdir(hffiles_dir)
-            if d.startswith("hf_POSCAR-")
-            and os.path.isdir(os.path.join(hffiles_dir, d))
-        )
+        all_hf_abs = list_hf_dirs(hffiles_dir)
+        all_hf = [os.path.basename(d) for d in all_hf_abs]
 
         if not all_hf:
             print("  No hf_POSCAR-* dirs found. Running orchestration script...")
             run_command(vasp_script_path, cwd=hffiles_dir)
-            all_hf = sorted(
-                d for d in os.listdir(hffiles_dir)
-                if d.startswith("hf_POSCAR-")
-                and os.path.isdir(os.path.join(hffiles_dir, d))
-            )
+            all_hf_abs = list_hf_dirs(hffiles_dir)
+            all_hf = [os.path.basename(d) for d in all_hf_abs]
             if not all_hf:
                 print("  ERROR: orchestration script created no hf_POSCAR-* directories.")
                 return False
 
         # On retry, only process incomplete directories
         if i > 0:
-            incomplete = [
-                d for d in all_hf
-                if not is_calculation_complete(os.path.join(hffiles_dir, d))
-            ]
+            incomplete = [d for d in all_hf if not is_calculation_complete(os.path.join(hffiles_dir, d))]
             if not incomplete:
                 print("  All hf_POSCAR-* directories already complete.")
                 return True
@@ -57,7 +70,7 @@ def run_hf_loop(hffiles_dir, vasp_script_path, max_restarts,
 
         # ── Run VASP in the (possibly filtered) set of directories ───────
         if cpu_flag:
-            _run_cpu(all_hf, hffiles_dir, srun_args, vasp_binary)
+            _run_serial_dirs(all_hf, hffiles_dir, srun_args, vasp_binary)
         elif hf_parallel:
             _run_hf_parallel(all_hf, hffiles_dir, srun_args, vasp_binary, vasp_script_path)
         else:
@@ -65,17 +78,12 @@ def run_hf_loop(hffiles_dir, vasp_script_path, max_restarts,
                             vasp_script_path, first_iteration=(i == 0))
 
         # ── Validate ─────────────────────────────────────────────────────
-        hf_dirs = sorted(
-            d for d in os.listdir(hffiles_dir)
-            if d.startswith("hf_POSCAR-")
-            and os.path.isdir(os.path.join(hffiles_dir, d))
-        )
+        hf_dirs = [os.path.basename(d) for d in list_hf_dirs(hffiles_dir)]
         if not hf_dirs:
             print("No hf_POSCAR-* folders found.")
             return False
 
-        failed = [d for d in hf_dirs
-                  if not is_calculation_complete(os.path.join(hffiles_dir, d))]
+        failed = [d for d in hf_dirs if not is_calculation_complete(os.path.join(hffiles_dir, d))]
         if not failed:
             print(f"VASP runs completed in all {len(hf_dirs)} displacement directories.")
             return True
@@ -92,12 +100,13 @@ def run_hf_loop(hffiles_dir, vasp_script_path, max_restarts,
 
 # ── Internal runners ────────────────────────────────────────────────────────
 
-def _run_cpu(dirs, hffiles_dir, srun_args, vasp_binary):
-    print(f"  [cpu] Running VASP in {len(dirs)} directories...")
+def _run_serial_dirs(dirs, hffiles_dir, srun_args, vasp_binary):
+    """Run VASP serially in each named directory (names relative to hffiles_dir)."""
+    print(f"  Running VASP serially in {len(dirs)} directories...")
     for d in dirs:
-        dpath = os.path.join(hffiles_dir, d)
         print(f"    Running VASP in {d}...")
-        run_command(f"srun {srun_args} {vasp_binary} > stdout", cwd=dpath)
+        run_command(f"srun {srun_args} {vasp_binary} > stdout",
+                    cwd=os.path.join(hffiles_dir, d))
 
 
 def _run_gpu_serial(dirs, hffiles_dir, srun_args, vasp_binary,
@@ -109,10 +118,7 @@ def _run_gpu_serial(dirs, hffiles_dir, srun_args, vasp_binary,
             cwd=hffiles_dir,
         )
     else:
-        for d in dirs:
-            dpath = os.path.join(hffiles_dir, d)
-            print(f"    Running VASP in {d}...")
-            run_command(f"srun {srun_args} {vasp_binary} > stdout", cwd=dpath)
+        _run_serial_dirs(dirs, hffiles_dir, srun_args, vasp_binary)
 
 
 def _run_hf_parallel(dirs, hffiles_dir, srun_args, vasp_binary, vasp_script_path):

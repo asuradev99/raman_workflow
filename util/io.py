@@ -11,6 +11,7 @@ class Tee:
     """Duplicate all writes to the real stdout, a status file, and optionally a
     full-output log file."""
     def __init__(self, log_path, out_path=None):
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
         self.log = open(log_path, "a")
         self.out = open(out_path, "a") if out_path else None
         self.stdout = sys.stdout
@@ -35,18 +36,21 @@ class Tee:
             self.out.close()
 
 
-def run_command(command, cwd=None, shell=True, check_success=True):
-    """
-    Executes a shell command.
+def run_command(command, cwd=None, shell=True, check_success=True, verbose=True):
+    """Execute a shell command, optionally printing banners.
+
     Args:
-        command (str): The shell command to execute.
-        cwd (str, optional): The current working directory for the command.
-        shell (bool): Whether to use the shell. Defaults to True.
-        check_success (bool): If True, raises RuntimeError if command exits with non-zero code.
+        command: The shell command to execute.
+        cwd: Working directory for the command.
+        shell: Whether to use the shell. Defaults to True.
+        check_success: Raise RuntimeError on non-zero exit. Defaults to True.
+        verbose: Print ``--- Running ---`` banners. Set False for file-copy
+            operations where the noise would clutter the log.
     """
-    print(f"\n--- Running: {command} ---")
-    if cwd:
-        print(f"--- In directory: {cwd} ---")
+    if verbose:
+        print(f"\n--- Running: {command} ---")
+        if cwd:
+            print(f"--- In directory: {cwd} ---")
 
     try:
         process = subprocess.Popen(
@@ -60,7 +64,10 @@ def run_command(command, cwd=None, shell=True, check_success=True):
 
         if check_success and process.returncode != 0:
             raise RuntimeError(f"Command failed with exit code {process.returncode}: {command}")
-        print("--- Command completed successfully ---")
+        if verbose:
+            print("--- Command completed successfully ---")
+    except RuntimeError:
+        raise
     except Exception as e:
         print(f"--- ERROR: {e} ---")
         if check_success:
@@ -84,26 +91,29 @@ def calc_duration(start_ts, end_ts):
 
 
 def print_job_header(material_label, material_name, work_dir, status_file,
-                     scratch_flag, restart_flag, cpu_flag):
+                     scratch_flag, restart_flag, cpu_flag,
+                     compute_mode="interactive_manual", inside_salloc=False):
     """Print a formatted job-start banner to stdout and the log."""
     _now = time.strftime("%Y-%m-%d %H:%M:%S %Z")
-    _cmd = " ".join(sys.argv)
     _node = os.uname().nodename
+    _mode_suffix = " [inside salloc]" if inside_salloc else ""
     _sep = "\u2550" * 78
     print(f"\n{_sep}")
-    print(f"  RAMAN PIPELINE START")
     print(f"{_sep}")
-    print(f"  Date      : {_now}")
-    print(f"  Host      : {_node}")
-    print(f"  Material  : {material_label}  ({material_name})")
-    print(f"  Work dir  : {work_dir}")
-    print(f"  Log file  : {status_file}")
+    print(f"  RAMAN PIPELINE — JOB START{_mode_suffix}")
+    print(f"{_sep}")
+    print(f"  Date        : {_now}")
+    print(f"  Host        : {_node}")
+    print(f"  Material    : {material_label}  ({material_name})")
+    print(f"  Work dir    : {work_dir}")
+    print(f"  Log file    : {status_file}")
+    print(f"  Compute     : {compute_mode}")
     print(
-        f"  Flags     : scratch={'on' if scratch_flag else 'off'}  "
+        f"  Flags       : scratch={'on' if scratch_flag else 'off'}  "
         f"restart={'on' if restart_flag else 'off'}  "
         f"cpu={'on' if cpu_flag else 'off'}"
     )
-    print(f"  Command   : python {_cmd}")
+    print(f"{_sep}")
     print(f"{_sep}\n")
 
 

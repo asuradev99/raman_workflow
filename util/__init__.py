@@ -12,12 +12,13 @@ from .vasp import (
 )
 from .incar import build_incar_content, write_incar
 from .kpoints import write_kpoints
-from .config import load_config, merge_config, build_srun_args, split_srun_args, validate_config
+from .config import load_config, merge_config, get_srun_args, split_srun_args, validate_config
 from .symlinks import update_wavecar_symlinks, update_chgcar_symlinks
 from .status import (
     STEP_DESCRIPTIONS, STEP_HISTORY, TOTAL_STEPS,
     write_status, make_write_status, parse_resume_step,
     print_step_header, print_step_result,
+    populate_step_descriptions,
 )
 from .phonopy import ensure_dim_in_conf, write_eigenvectors_conf
 from .postproc import generate_kopia_script, inject_ramfile_energies
@@ -68,8 +69,14 @@ def run_relaxation_with_zbrent_retry(scf_dir, srun_args, vasp_binary, stage_labe
                         print(f"  [zbrent] Forces converged (max |F| = {max_f:.6f} eV/Å). "
                               f"Copied CONTCAR → POSCAR for retry.")
                     else:
+                        f_str = f"{max_f:.6f} eV/Å" if max_f is not None else "unavailable (no OUTCAR)"
                         print(f"  [zbrent] ZBRENT error detected "
-                              f"(max |F| = {max_f:.6f} eV/Å — not yet converged).")
+                              f"(max |F| = {f_str} — not yet converged).")
+                else:
+                    # Not ZBRENT — e.g., NSW exhausted without convergence
+                    if _os.path.exists(contcar_path) and _os.path.exists(poscar_path):
+                        _shutil.copy(contcar_path, poscar_path)
+                        print(f"  [relax] Copied CONTCAR → POSCAR to continue from best structure.")
                 continue
     print(f"  [relax] Max attempts ({max_attempts}) reached.")
     return False

@@ -3,71 +3,52 @@
 import os
 
 
-def update_wavecar_symlinks(hffiles_dir, source_subdir="groundstate"):
-    """Replace runHF's dangling ``../WAVECAR`` symlinks with correct targets.
+def update_hf_symlinks(hffiles_dir, source_subdir="groundstate"):
+    """Create/replace WAVECAR and CHGCAR symlinks in all hf_POSCAR-* dirs.
 
     Args:
         hffiles_dir: Path to the hf/ directory.
-        source_subdir: Subdirectory containing WAVECAR.  Default ``"groundstate"``;
-            use ``"scf"`` for supercell-started runs.
+        source_subdir: Subdirectory containing the charge/wave files.
+            ``"groundstate"`` (default) for normal runs; ``"scf"`` when
+            ``start_from_supercell`` skipped the groundstate relaxation.
     """
-    if source_subdir == "scf":
-        rel_target = "../../scf/WAVECAR"
-        work_dir = os.path.dirname(hffiles_dir)
-        src_path = os.path.join(work_dir, "scf", "WAVECAR")
-    else:
-        rel_target = "../groundstate/WAVECAR"
-        src_path = os.path.join(hffiles_dir, "groundstate", "WAVECAR")
+    _LINKS = [
+        ("WAVECAR", "displacement runs will start from scratch"),
+        ("CHGCAR",  "displacement runs will start without charge-density seeding"),
+    ]
+    work_dir = os.path.dirname(hffiles_dir)
 
-    if not os.path.exists(src_path):
-        print(f"  WARNING: {src_path} not found — displacement runs will start from scratch")
-        return 0
+    for filename, warn_msg in _LINKS:
+        if source_subdir == "scf":
+            rel_target = f"../../scf/{filename}"
+            src_path = os.path.join(work_dir, "scf", filename)
+        else:
+            rel_target = f"../groundstate/{filename}"
+            src_path = os.path.join(hffiles_dir, "groundstate", filename)
 
-    displacement_dirs = sorted(
-        d for d in os.listdir(hffiles_dir)
-        if d.startswith("hf_POSCAR-") and os.path.isdir(os.path.join(hffiles_dir, d))
-    )
-    for d in displacement_dirs:
-        wav = os.path.join(hffiles_dir, d, "WAVECAR")
-        if os.path.islink(wav):
-            os.remove(wav)
-        os.symlink(rel_target, wav)
+        if not os.path.exists(src_path):
+            print(f"  WARNING: {src_path} not found — {warn_msg}")
+            continue
 
-    print(f"  Replaced symlinks in {len(displacement_dirs)} displacement dirs:")
-    print(f"    hf_POSCAR-*/WAVECAR → {rel_target}")
-    return len(displacement_dirs)
+        dirs = sorted(
+            d for d in os.listdir(hffiles_dir)
+            if d.startswith("hf_POSCAR-") and os.path.isdir(os.path.join(hffiles_dir, d))
+        )
+        for d in dirs:
+            link = os.path.join(hffiles_dir, d, filename)
+            if os.path.islink(link) or os.path.exists(link):
+                os.remove(link)
+            os.symlink(rel_target, link)
+
+        print(f"  {filename} symlinks → {rel_target} in {len(dirs)} dirs")
+
+
+# Backward-compatible aliases kept for any external scripts that call the old names.
+def update_wavecar_symlinks(hffiles_dir, source_subdir="groundstate"):
+    """Deprecated: use update_hf_symlinks instead."""
+    update_hf_symlinks(hffiles_dir, source_subdir)
 
 
 def update_chgcar_symlinks(hffiles_dir, source_subdir="groundstate"):
-    """Create CHGCAR symlinks in each ``hf_POSCAR-*/``.
-
-    Args:
-        hffiles_dir: Path to the hf/ directory.
-        source_subdir: Subdirectory containing CHGCAR.  Default ``"groundstate"``;
-            use ``"scf"`` for supercell-started runs.
-    """
-    if source_subdir == "scf":
-        rel_target = "../../scf/CHGCAR"
-        work_dir = os.path.dirname(hffiles_dir)
-        src_path = os.path.join(work_dir, "scf", "CHGCAR")
-    else:
-        rel_target = "../groundstate/CHGCAR"
-        src_path = os.path.join(hffiles_dir, "groundstate", "CHGCAR")
-
-    if not os.path.exists(src_path):
-        print(f"  WARNING: {src_path} not found — displacement runs will start without charge-density seeding")
-        return 0
-
-    displacement_dirs = sorted(
-        d for d in os.listdir(hffiles_dir)
-        if d.startswith("hf_POSCAR-") and os.path.isdir(os.path.join(hffiles_dir, d))
-    )
-    for d in displacement_dirs:
-        chg = os.path.join(hffiles_dir, d, "CHGCAR")
-        if os.path.islink(chg) or os.path.exists(chg):
-            os.remove(chg)
-        os.symlink(rel_target, chg)
-
-    print(f"  Created CHGCAR symlinks in {len(displacement_dirs)} displacement dirs:")
-    print(f"    hf_POSCAR-*/CHGCAR → {rel_target}")
-    return len(displacement_dirs)
+    """Deprecated: use update_hf_symlinks instead."""
+    update_hf_symlinks(hffiles_dir, source_subdir)

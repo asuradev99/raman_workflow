@@ -38,32 +38,27 @@ def load_config(paths):
     return config
 
 
-def build_srun_args(config, cpu_flag=False):
-    """Build an srun argument string from the pipeline config.
+def get_srun_args(config, mode, key="srun_relax", cpu_flag=False):
+    """Get srun args from ``compute_modes.<mode>.<key>`` in the config.
 
-    If the config contains a ``raw`` key under ``vasp_srun`` or
-    ``vasp_srun_cpu``, it is returned verbatim.  Without ``raw``, the
-    string is assembled from individual keys with Python-level defaults.
+    Falls back to ``vasp_srun_cpu.raw`` for CPU, or raises KeyError if
+    the mode/key combination is missing.
     """
-    key = "vasp_srun_cpu" if cpu_flag else "vasp_srun"
-    cfg = config.get(key, {}) if isinstance(config, dict) else {}
-
-    if "raw" in cfg:
-        return cfg["raw"]
-
     if cpu_flag:
-        ntasks = cfg.get("ntasks", 32)
-        cpus_per_task = cfg.get("cpus_per_task", 4)
-        return (f"--cpu_bind=cores --ntasks {ntasks} "
-                f"--cpus-per-task {cpus_per_task}")
-    else:
-        gpus = cfg.get("gpus", 4)
-        ntasks = cfg.get("ntasks", 4)
-        cpus_per_task = cfg.get("cpus_per_task", 32)
-        constraint = cfg.get("constraint", "gpu")
-        return (f"--cpu_bind=cores --gpus {gpus} "
-                f"--ntasks {ntasks} --cpus-per-task {cpus_per_task} "
-                f"-C {constraint}")
+        cpu_cfg = config.get("vasp_srun_cpu", {})
+        if isinstance(cpu_cfg, dict) and "raw" in cpu_cfg:
+            return cpu_cfg["raw"]
+        return "--cpu_bind=cores --ntasks 32 --cpus-per-task 4"
+
+    modes = config.get("compute_modes", {})
+    mode_cfg = modes.get(mode, {})
+    args = mode_cfg.get(key, "")
+    if args:
+        return args
+    raise KeyError(
+        f"Missing compute_modes.{mode}.{key} in config. "
+        f"Available modes: {list(modes.keys())}"
+    )
 
 
 # ── Required config keys (checked after loading) ──────────────────────────
@@ -78,8 +73,9 @@ REQUIRED_CONFIG = {
     "vasp_loop": ["max_restarts"],
     "eigenvectors_band": ["path", "labels", "points"],
     "broadening": ["mode", "hwhm", "interpolation", "normalization"],
-    "vasp_srun": None,
+    "compute_modes": None,
     "vasp_srun_cpu": None,
+    "system_paths": None,
     "incar_templates": ["relax", "dielec", "hf", "supercell_relax"],
 }
 
@@ -148,3 +144,26 @@ def split_srun_args(srun_args, num_dirs):
               f"({total_gpus} not divisible by {num_dirs})")
 
     return result
+
+
+def get_mode_setting(config, mode, key, default=None):
+    """Get a setting from ``compute_modes.<mode>.<key>`` with fallback.
+
+    Falls back to ``vasp_srun.<key>`` (old config format) if
+    ``compute_modes`` is not present.
+    """
+    modes = config.get("compute_modes", {})
+    if modes and mode in modes:
+        return modes[mode].get(key, default)
+    # Fallback: old vasp_srun section
+    vs = config.get("vasp_srun", {})
+    return vs.get(key, default)
+
+
+def get_mode_salloc(config, mode, key):
+    """Get a salloc arg string from ``compute_modes.<mode>.<key>``.
+
+    Returns the full salloc argument string (without ``salloc`` prefix),
+    e.g. ``-N 4 -C gpu --gpus-per-node=4 -t 02:00:00 --qos=interactive -A m526``.
+    """
+    return get_mode_setting(config, mode, key, "")

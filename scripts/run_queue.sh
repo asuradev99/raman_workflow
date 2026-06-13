@@ -178,7 +178,12 @@ for entry in "${QUEUE_MATERIALS[@]}"; do
     GPUS=$((NODES * 4))
 
     MATERIAL_DIR="$RAMAN_PROJECT_DIR/$MATERIAL_NAME"
-    LOG_FILE="$MATERIAL_DIR/workflow.log"
+    # workflow.log lives on SCRATCH when --scratch is active
+    if [ -n "$SCRATCH_FLAG" ] && [ -n "${SCRATCH:-}" ]; then
+        LOG_FILE="${SCRATCH}/vasp_calculations/${MATERIAL_NAME}/workflow.log"
+    else
+        LOG_FILE="$MATERIAL_DIR/workflow.log"
+    fi
 
     # ── Pre-check: directory exists? ───────────────────────────────────────
     if [ ! -d "$MATERIAL_DIR" ]; then
@@ -328,7 +333,11 @@ if [ "$QUEUE_FAILED" -gt 0 ]; then
     echo "  Failed materials:"
     for entry in "${QUEUE_MATERIALS[@]}"; do
         IFS='|' read -r name _wt _qos _nodes <<< "$entry"
-        LOG="$RAMAN_PROJECT_DIR/$name/workflow.log"
+        if [ -n "$SCRATCH_FLAG" ] && [ -n "${SCRATCH:-}" ]; then
+            LOG="${SCRATCH}/vasp_calculations/${name}/workflow.log"
+        else
+            LOG="$RAMAN_PROJECT_DIR/$name/workflow.log"
+        fi
         if [ -f "$LOG" ] && ! grep -q "Status.*COMPLETED" "$LOG" 2>/dev/null; then
             echo "    ✗ $name  (tail -80 $LOG)"
         fi

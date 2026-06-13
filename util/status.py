@@ -6,24 +6,27 @@ import time
 from .io import calc_duration, fmt_time
 
 
-# ── Step descriptions ─────────────────────────────────────────────────────
-STEP_DESCRIPTIONS = {
-    1: "VASP relaxation",
-    2: "Supercell generation + relaxation",
-    3: "hf/ directory setup (copy, verify, runHF, symlinks)",
-    4: "VASP force constants",
-    5: "Phonon postprocessing",
-    6: "Raman setup + displacement generation",
-    7: "Resonant VASP dielectric calculations",
-    8: "Post-processing (kopia, RAMFILE, tensor, SpectroPy)",
-    "final": "Pipeline complete",
-}
+# STEP_DESCRIPTIONS is populated at pipeline startup from PIPELINE (src/__init__.py)
+# so that the descriptions in the status table always match the Step registry.
+# The dict is initialised empty here; automation_raman_analysis.py calls
+# populate_step_descriptions() before running any steps.
+STEP_DESCRIPTIONS: dict = {}
 
 # Accumulated step history (preserved across write_status calls)
-STEP_HISTORY = {}
+STEP_HISTORY: dict = {}
 
 # Total number of steps for display
 TOTAL_STEPS = 8
+
+
+def populate_step_descriptions(descriptions: dict) -> None:
+    """Inject step descriptions derived from the PIPELINE registry.
+
+    Called once at pipeline startup so the status table uses the same
+    human-readable labels as the Step objects in src/__init__.py.
+    """
+    STEP_DESCRIPTIONS.clear()
+    STEP_DESCRIPTIONS.update(descriptions)
 
 
 # ── Step banners ───────────────────────────────────────────────────────────
@@ -112,7 +115,7 @@ def write_status(step, status, message="", *,
     lines.append(f"  Elapsed  {elapsed}")
     lines.append("")
 
-    table_keys = sorted(k for k in STEP_DESCRIPTIONS if isinstance(k, int))
+    table_keys = sorted(k for k in STEP_DESCRIPTIONS if isinstance(k, (int, float)))
     rows = []
     for s in table_keys:
         h = STEP_HISTORY.get(s, {})
@@ -210,7 +213,8 @@ def parse_resume_step(status_file, step_history, step_descriptions):
             if len(parts) < 4:
                 continue
             try:
-                step_num = int(parts[1])
+                step_str = parts[1].strip()
+                step_num = float(step_str) if '.' in step_str else int(step_str)
             except (ValueError, IndexError):
                 continue
 
@@ -241,7 +245,7 @@ def parse_resume_step(status_file, step_history, step_descriptions):
             print(f"[resume] Step {failed_step} was FAILED. Retrying from step {failed_step}.")
             return failed_step
 
-        all_step_keys = sorted(k for k in step_descriptions if isinstance(k, int))
+        all_step_keys = sorted(k for k in step_descriptions if isinstance(k, (int, float)))
         for s in all_step_keys:
             if s not in completed_steps:
                 print(f"[resume] Continuing from step {s} "

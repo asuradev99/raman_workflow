@@ -11,9 +11,10 @@ if _RAMAN_WORKFLOW_DIR not in sys.path:
 import argparse
 import shutil
 from util import (
-    Tee, run_command, load_config, validate_config, build_srun_args,
+    Tee, run_command, load_config, validate_config, get_srun_args,
     parse_resume_step, make_pipeline_excepthook, run_relaxation_with_zbrent_retry,
     print_job_header, make_write_status, STEP_HISTORY, STEP_DESCRIPTIONS,
+    populate_step_descriptions,
 )
 
 # ── CLI flags via argparse ──────────────────────────────────────────────────
@@ -29,13 +30,24 @@ parser.add_argument(
 parser.add_argument(
     "--scratch", action="store_true", help="Run VASP stages on SCRATCH filesystem"
 )
+parser.add_argument(
+    "--salloc-steps",
+    action="store_true",
+    help="Internal: run only salloc-required steps (1-3) and exit"
+)
+parser.add_argument(
+    "--inside-salloc",
+    action="store_true",
+    help="Internal: pipeline is already inside an salloc allocation — skip auto-provision",
+)
 args, remaining = parser.parse_known_args()
-# Strip parsed flags, keep everything else for any downstream consumer
 sys.argv = [sys.argv[0]] + remaining
 
 RESTART_FLAG = args.restart
 CPU_FLAG = args.cpu
 SCRATCH_FLAG = args.scratch
+SALLOC_STEPS_FLAG = args.salloc_steps
+INSIDE_SALLOC_FLAG = args.inside_salloc
 
 # ── Config paths (env vars in ~/.bashrc; see CLAUDE.md) ──────────────────────
 BASE_PROJECT_DIR = os.environ.get("RAMAN_PROJECT_DIR", "")
@@ -54,16 +66,13 @@ if CWD_BASENAME not in os.listdir(BASE_PROJECT_DIR):
     sys.exit(1)
 MATERIAL_DIR = os.path.join(BASE_PROJECT_DIR, CWD_BASENAME)
 
-# workflow.log ALWAYS lives on HOME — it's tiny text, and keeping it on HOME:
-#  - survives SCRATCH purges (90-day NERSC retention)
-#  - is visible to monitoring scripts (show_status.sh, tail)
-#  - makes config-staleness checks meaningful (same filesystem as configs)
-STATUS_FILE = os.path.join(MATERIAL_DIR, "workflow.log")
-OUTPUT_FILE = os.path.join(MATERIAL_DIR, "workflow.out")
-
-# Preliminary WORK_DIR for --restart cleanup (refined after config load)
+# Preliminary WORK_DIR (refined after config load) — used for log files too
 _scratch_base = os.environ.get("SCRATCH", "")
 WORK_DIR = os.path.join(_scratch_base, "vasp_calculations", CWD_BASENAME) if SCRATCH_FLAG and _scratch_base else MATERIAL_DIR
+
+# workflow.log and workflow.out live in WORK_DIR (pscratch by default)
+STATUS_FILE = os.path.join(WORK_DIR, "workflow.log")
+OUTPUT_FILE = os.path.join(WORK_DIR, "workflow.out")
 
 # ── --restart: delete all generated directories, keep input/ + config ────────
 if RESTART_FLAG:
@@ -81,12 +90,13 @@ if RESTART_FLAG:
             shutil.rmtree(home_output)
             print(f"  [restart] Removed HOME output/: {home_output}")
 
-    # Remove all log files (clean start)
+    # Remove all log files (clean start) — check both HOME and WORK_DIR
     for log_name in ("workflow.log", "workflow.out", "salloc_output.log"):
-        log_path = os.path.join(MATERIAL_DIR, log_name)
-        if os.path.exists(log_path):
-            os.remove(log_path)
-            print(f"  [restart] Removed: {log_path}")
+        for base in (MATERIAL_DIR, WORK_DIR):
+            log_path = os.path.join(base, log_name)
+            if os.path.exists(log_path):
+                os.remove(log_path)
+                print(f"  [restart] Removed: {log_path}")
 
     print(f"  [restart] Done — input/ (including workflow_settings.yaml) preserved.")
     print(f"  [restart] Starting fresh pipeline from step 3...")
@@ -99,36 +109,6 @@ sys.stdout = Tee(STATUS_FILE, OUTPUT_FILE)
 if RESTART_FLAG:
     print("")  # blank line after restart messages
 
-# Binary utilities dir (override via env var)
-DEFAULT_BINARY_UTILITIES_DIR = "/global/cfs/cdirs/m526/vasp_binaries/binary_utility"
-BINARY_UTILITIES_DIR = os.environ.get(
-    "BINARY_UTILITIES_DIR", DEFAULT_BINARY_UTILITIES_DIR
-)
-
-# VASP binary path (GPU default; VASP_BINARY_CPU with --cpu)
-DEFAULT_VASP_BINARY_GPU = "/global/cfs/cdirs/m526/liangbo/bin/gpu/vasp_std"
-DEFAULT_VASP_BINARY_CPU = "/global/cfs/cdirs/m526/liangbo/bin/cpu/vasp_std"
-if CPU_FLAG:
-    VASP_BINARY_PATH = os.environ.get("VASP_BINARY_CPU", DEFAULT_VASP_BINARY_CPU)
-else:
-    VASP_BINARY_PATH = os.environ.get("VASP_BINARY", DEFAULT_VASP_BINARY_GPU)
-
-# Validate VASP binary
-if not os.path.isfile(VASP_BINARY_PATH):
-    print(f"Error: VASP binary not found at '{VASP_BINARY_PATH}'")
-    print("Set the VASP_BINARY environment variable to a valid VASP binary path.")
-    print(f"Expected location: {VASP_BINARY_PATH}")
-    sys.exit(1)
-print(f"VASP binary found: {VASP_BINARY_PATH}")
-if CPU_FLAG:
-    print(f"  (CPU mode: --cpu flag set)")
-
-if not os.path.isdir(BINARY_UTILITIES_DIR):
-    print(f"Error: BINARY_UTILITIES_DIR '{BINARY_UTILITIES_DIR}' does not exist.")
-    print("Set the BINARY_UTILITIES_DIR environment variable to a valid directory.")
-    sys.exit(1)
-print(f"Binary utilities directory found: {BINARY_UTILITIES_DIR}")
-
 # Config inheritance: shared YAML → per-material YAML
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(MATERIAL_DIR, "input", "workflow_settings.yaml")
@@ -140,6 +120,37 @@ CONFIG = load_config([
 ])
 
 validate_config(CONFIG)
+
+# ── System paths — from YAML config, with env-var override for backward compat ─
+_sp = CONFIG.get("system_paths", {})
+BINARY_UTILITIES_DIR = os.environ.get("BINARY_UTILITIES_DIR") or _sp.get(
+    "binary_utilities_dir", ""
+)
+VASP_BINARY_PATH = (
+    os.environ.get("VASP_BINARY_CPU") or _sp.get("vasp_binary_cpu", "")
+    if CPU_FLAG
+    else os.environ.get("VASP_BINARY") or _sp.get("vasp_binary", "")
+)
+
+if not VASP_BINARY_PATH:
+    print("Error: VASP binary not configured. Set system_paths.vasp_binary in config "
+          "or VASP_BINARY env var.")
+    sys.exit(1)
+if not os.path.isfile(VASP_BINARY_PATH):
+    print(f"Error: VASP binary not found at '{VASP_BINARY_PATH}'")
+    sys.exit(1)
+print(f"VASP binary: {VASP_BINARY_PATH}" + (" (CPU)" if CPU_FLAG else ""))
+if CPU_FLAG:
+    print(f"  (CPU mode: --cpu flag set)")
+
+if not BINARY_UTILITIES_DIR:
+    print("Error: binary_utilities_dir not set. Add to system_paths in config.")
+    sys.exit(1)
+if not os.path.isdir(BINARY_UTILITIES_DIR):
+    print(f"Error: BINARY_UTILITIES_DIR '{BINARY_UTILITIES_DIR}' does not exist.")
+    print("Set the BINARY_UTILITIES_DIR environment variable to a valid directory.")
+    sys.exit(1)
+print(f"Binary utilities directory found: {BINARY_UTILITIES_DIR}")
 
 # ── Resolve material identity from config ────────────────────────────────────
 MATERIAL_NAME = CONFIG.get("name") or CWD_BASENAME
@@ -160,8 +171,11 @@ else:
 HFFILES_DIR = os.path.join(WORK_DIR, "hf")
 RAMAN_DIR = os.path.join(WORK_DIR, "raman")
 
-# STATUS_FILE always on HOME — see comment at preliminary assignment above
 sys.excepthook = make_pipeline_excepthook(STATUS_FILE)
+
+# ── Compute mode — must be defined before print_job_header ───────────────────
+COMPUTE_MODE = CONFIG.get("compute_mode", "interactive_manual")
+SRUN_ARGS = get_srun_args(CONFIG, COMPUTE_MODE, "srun_relax", CPU_FLAG)
 
 # ── Job start header ──────────────────────────────────────────────────────────
 print_job_header(
@@ -172,6 +186,8 @@ print_job_header(
     scratch_flag=SCRATCH_FLAG,
     restart_flag=RESTART_FLAG,
     cpu_flag=CPU_FLAG,
+    compute_mode=COMPUTE_MODE,
+    inside_salloc=INSIDE_SALLOC_FLAG or SALLOC_STEPS_FLAG,
 )
 
 if MATERIAL_NAME != CWD_BASENAME:
@@ -184,8 +200,6 @@ if not os.path.isdir(MATERIAL_DIR):
         f"Error: MATERIAL_DIR '{MATERIAL_DIR}' does not exist (from config name '{MATERIAL_NAME}')."
     )
     sys.exit(1)
-
-SRUN_ARGS = build_srun_args(CONFIG, CPU_FLAG)
 
 HF_PARALLEL = CONFIG.get("hf_parallel", False)
 
@@ -267,7 +281,13 @@ if SCRATCH_FLAG:
 #  WORKFLOW STEPS — dispatched to steps/ modules
 # ═══════════════════════════════════════════════════════════════════════════════
 
-from src import STEP_FUNCTIONS, build_context
+from src import PIPELINE, STEP_BY_NUMBER, build_context
+from util.compute import build_bash_setup, run_pipeline_in_salloc
+
+# Derive status-table descriptions from the Step registry (single source of truth)
+populate_step_descriptions(
+    {s.number: s.description for s in PIPELINE} | {"final": "Pipeline complete"}
+)
 
 ctx = build_context(
     write_status,
@@ -285,13 +305,97 @@ ctx = build_context(
     SCRATCH_FLAG,
     run_relaxation_with_zbrent_retry,
     vasp_loop_check_and_restart,
+    inside_salloc=INSIDE_SALLOC_FLAG or SALLOC_STEPS_FLAG,
 )
 
-for step_num in sorted(STEP_FUNCTIONS):
-    if step_num < START_STEP:
+# ── Auto-provision: wrap pipeline in salloc when not already inside one ──────
+_AUTO_MODES = frozenset({
+    "interactive_serial",
+    "sbatch_parallel", "interactive_parallel", "sbatch",
+})
+_SALLOC_FULL_MODES = frozenset({"interactive_serial", "interactive_parallel"})
+if COMPUTE_MODE in _AUTO_MODES and not (INSIDE_SALLOC_FLAG or SALLOC_STEPS_FLAG):
+    import subprocess
+    full_pipeline = COMPUTE_MODE in _SALLOC_FULL_MODES
+    print(f"\n  [auto-provision] Wrapping pipeline in salloc ({COMPUTE_MODE})…")
+    try:
+        run_pipeline_in_salloc(ctx, full_pipeline=full_pipeline)
+    except subprocess.CalledProcessError:
+        pass
+
+    if full_pipeline:
+        next_step = parse_resume_step(STATUS_FILE, STEP_HISTORY, STEP_DESCRIPTIONS)
+        sep = "  " + "=" * 70
+        print(f"\n{sep}")
+        if next_step is None:
+            print(f"  [pipeline] SALLOC RELEASED — pipeline COMPLETE.")
+            print(f"  [pipeline] Log: {STATUS_FILE}")
+            print(f"{sep}\n")
+            sys.exit(0)
+        else:
+            print(f"  [pipeline] SALLOC RELEASED — pipeline INCOMPLETE (next: step {next_step}).")
+            print(f"  [pipeline] Retry will resume from step {next_step}.")
+            print(f"  [pipeline] Log: {STATUS_FILE}")
+            print(f"{sep}\n")
+            sys.exit(42)
+    else:
+        print(f"  [auto-provision] SALLOC done — continuing steps 4+ on login node.")
+        START_STEP = max(START_STEP, 4)
+
+# ── sbatch-serial: wrap entire pipeline in a single sbatch (no salloc) ──────
+elif COMPUTE_MODE == "sbatch_serial" and not (INSIDE_SALLOC_FLAG or SALLOC_STEPS_FLAG):
+    from util.compute import submit_sbatch_wrapper
+    sp = ctx.system_paths
+    raman_workflow_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    python_bin = os.path.join(sp.get("conda_env", ""), "bin", "python3")
+    if not os.path.isfile(python_bin):
+        python_bin = "python3"
+    flags = ["--inside-salloc"]
+    if SCRATCH_FLAG:
+        flags.append("--scratch")
+    if CPU_FLAG:
+        flags.append("--cpu")
+    wrapper = "\n".join([
+        "#!/bin/bash -l",
+        build_bash_setup(sp),
+        f"export PYTHONPATH={raman_workflow_dir}:$PYTHONPATH",
+        f"cd {MATERIAL_DIR}",
+        f"export RAMAN_PROJECT_DIR={os.environ.get('RAMAN_PROJECT_DIR', '')}",
+        f"{python_bin} -m src.automation_raman_analysis {' '.join(flags)}",
+    ])
+    print(f"\n  [sbatch-serial] Submitting full pipeline as single sbatch…")
+    ok = submit_sbatch_wrapper(
+        wrapper,
+        job_name=f"raman_{MATERIAL_NAME}",
+        output_dir=WORK_DIR,
+        walltime="04:00:00",
+        nodes=1,
+    )
+    if not ok:
+        print("  [sbatch-serial] sbatch job failed. Check slurm logs.")
+        sys.exit(1)
+    # Check completion
+    next_step = parse_resume_step(STATUS_FILE, STEP_HISTORY, STEP_DESCRIPTIONS)
+    sep = "  " + "=" * 70
+    print(f"\n{sep}")
+    if next_step is None:
+        print(f"  [sbatch-serial] sbatch COMPLETED — pipeline COMPLETE.")
+        print(f"  [sbatch-serial] Log: {STATUS_FILE}")
+        print(f"{sep}\n")
+        sys.exit(0)
+    else:
+        print(f"  [sbatch-serial] sbatch COMPLETED — pipeline INCOMPLETE (next: step {next_step}).")
+        print(f"  [sbatch-serial] Log: {STATUS_FILE}")
+        print(f"{sep}\n")
+        sys.exit(1)
+
+# ── Step dispatch ─────────────────────────────────────────────────────────────
+for step in PIPELINE:
+    if step.number < START_STEP:
         continue
-    fn = STEP_FUNCTIONS[step_num]
-    fn_name = fn.__name__.split(".")[-1]
-    print(f"\n  [dispatch] Running step {step_num} ({fn_name})")
-    ctx["_step"] = step_num
-    fn.run(ctx)
+    if SALLOC_STEPS_FLAG and step.number > 3:
+        print(f"\n  [salloc-steps] Done with salloc-required steps (1–3). Exiting.")
+        break
+    ctx.current_step = step.number
+    print(f"\n  [dispatch] Step {step.number} — {step.description} ({step.name})")
+    step.run(ctx)

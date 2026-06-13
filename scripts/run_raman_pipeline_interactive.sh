@@ -15,9 +15,11 @@
 #    bash run_raman_pipeline_interactive.sh <material> [--restart] [--no-scratch]
 #
 #  Status tracking:
-#    workflow.log is written to the material directory on HOME.
+#    workflow.log is written to $SCRATCH/vasp_calculations/<material>/ (with --scratch)
+#    or to the material directory on HOME (with --no-scratch).
 #    Monitor from a second terminal:
-#      tail -f $RAMAN_PROJECT_DIR/<material>/workflow.log
+#      tail -f $SCRATCH/vasp_calculations/<material>/workflow.log  # default (--scratch)
+#      tail -f $RAMAN_PROJECT_DIR/<material>/workflow.log          # --no-scratch
 # =============================================================================
 
 set -euo pipefail

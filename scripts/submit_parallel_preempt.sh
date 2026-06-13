@@ -192,7 +192,11 @@ if [ ${#SUBMITTED_JOBS[@]} -gt 0 ]; then
     echo "  Per-material progress:"
     for entry in "${SUBMITTED_JOBS[@]}"; do
         IFS=':' read -r MATERIAL JID MODE <<< "$entry"
-        LOG_PATH="$RAMAN_PROJECT_DIR/$MATERIAL/workflow.log"
+        if [ -n "$SCRATCH_FLAG" ] && [ -n "${SCRATCH:-}" ]; then
+            LOG_PATH="${SCRATCH}/vasp_calculations/${MATERIAL}/workflow.log"
+        else
+            LOG_PATH="$RAMAN_PROJECT_DIR/$MATERIAL/workflow.log"
+        fi
         printf "    [%s] %-30s  tail -80 %s\n" "$JID" "$MATERIAL ($MODE)" "$LOG_PATH"
     done
 fi

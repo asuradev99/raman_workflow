@@ -1,4 +1,4 @@
-"""Step 10 — Phonon postprocessing."""
+"""Step 5 — Phonon postprocessing."""
 
 import os, time, glob, shutil
 from util.io import run_command
@@ -7,10 +7,10 @@ from util.status import print_step_header, print_step_result
 
 
 def run(ctx):
-    write_status = ctx["write_status"]
-    step = ctx["_step"]
-    hf_dir = ctx["hffiles_dir"]
-    bin_dir = ctx["binary_utilities_dir"]
+    write_status = ctx.write_status
+    step = ctx.current_step
+    hf_dir = ctx.hffiles_dir
+    bin_dir = ctx.binary_utilities_dir
     print_step_header(step)
     write_status(step, "running", "Phonon postprocessing")
     t_start = time.time()
@@ -24,17 +24,17 @@ def run(ctx):
     print("  [10b] Eigenvectors + symmetry...")
     write_eigenvectors_conf(
         os.path.join(hf_dir, "eigenvectors.conf"),
-        ctx["phonopy_dim"],
-        ctx["eigvec_band_path"],
-        ctx["eigvec_band_labels"],
-        ctx["eigvec_band_points"],
+        ctx.phonopy_dim,
+        ctx.eigvec_band_path,
+        ctx.eigvec_band_labels,
+        ctx.eigvec_band_points,
     )
     run_command("phonopy -c POSCAR_unitcell eigenvectors.conf", cwd=hf_dir)
     ensure_dim_in_conf(
-        os.path.join(hf_dir, "symmetry.conf"), "symmetry.conf", ctx["phonopy_dim"]
+        os.path.join(hf_dir, "symmetry.conf"), "symmetry.conf", ctx.phonopy_dim
     )
     run_command("phonopy -c POSCAR_unitcell symmetry.conf", cwd=hf_dir)
-    if int(ctx["phonopy_band_points"]) > 1:
+    if int(ctx.phonopy_band_points) > 1:
         print("  [10c] Full band-path — visualization + symmetry...")
         contcar_dst = os.path.join(hf_dir, "CONTCAR")
         if not (os.path.exists(contcar_dst) and os.path.getsize(contcar_dst) > 0):

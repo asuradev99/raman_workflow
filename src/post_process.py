@@ -5,18 +5,18 @@ from util.postproc import generate_kopia_script, inject_ramfile_energies
 from util.status import print_step_header, print_step_result
 
 def run(ctx):
-    write_status = ctx["write_status"]
-    step = ctx["_step"]
-    raman_dir = ctx["raman_dir"]
-    bin_dir = ctx["binary_utilities_dir"]
-    is_cpu = ctx["cpu_flag"]
-    energies = ctx["desired_energies"]
-    work_dir = ctx["work_dir"]
-    material_dir = ctx["material_dir"]
-    use_scratch = ctx["scratch_flag"]
-    script_dir = ctx["script_dir"]
-    config = ctx["config"]
-    hf_dir = ctx["hffiles_dir"]
+    write_status = ctx.write_status
+    step = ctx.current_step
+    raman_dir = ctx.raman_dir
+    bin_dir = ctx.binary_utilities_dir
+    is_cpu = ctx.cpu_flag
+    energies = ctx.desired_energies
+    work_dir = ctx.work_dir
+    material_dir = ctx.material_dir
+    use_scratch = ctx.scratch_flag
+    script_dir = ctx.script_dir
+    config = ctx.config
+    hf_dir = ctx.hffiles_dir
 
     print_step_header(step)
     write_status(step, "running", "Post-processing")
@@ -54,21 +54,23 @@ def run(ctx):
             raise RuntimeError(f"RAMFILE_{e} not produced")
 
     # ── Static copy to output/ ────────────────────────────────────────
-    run_command(f"cp {hf_dir}/band.yaml .", cwd=raman_dir, check_success=False)
-    run_command(f"cp {hf_dir}/irreps.yaml .", cwd=raman_dir, check_success=False)
+    for yaml_name in ("band.yaml", "irreps.yaml"):
+        src = os.path.join(hf_dir, yaml_name)
+        if os.path.exists(src):
+            shutil.copy2(src, os.path.join(raman_dir, yaml_name))
     output_dir = os.path.join(work_dir, "output")
-    run_command(f"mkdir -p {output_dir}", cwd=work_dir)
+    os.makedirs(output_dir, exist_ok=True)
     for filename in ("band.yaml", "irreps.yaml", "POSCAR_unitcell", "SPOSCAR",
                      "FORCE_SETS", "phonopy.yaml", "CONTCAR",
                      "eigenvectors.conf", "symmetry.conf"):
         src_path = os.path.join(hf_dir, filename)
         if os.path.exists(src_path) and os.path.getsize(src_path) > 0:
-            run_command(f"cp {src_path} {output_dir}/", cwd=work_dir, check_success=False)
+            shutil.copy2(src_path, output_dir)
     for mode_file in [os.path.join(hf_dir, "all_mode.txt")] + glob.glob(os.path.join(hf_dir, "mode*")):
         if os.path.exists(mode_file) and os.path.getsize(mode_file) > 0:
-            run_command(f"cp {mode_file} {output_dir}/", cwd=work_dir, check_success=False)
+            shutil.copy2(mode_file, output_dir)
     incar_dir = os.path.join(output_dir, "incar")
-    run_command(f"mkdir -p {incar_dir}", cwd=work_dir)
+    os.makedirs(incar_dir, exist_ok=True)
     incar_pairs = [
         (os.path.join(work_dir, "scf", "INCAR"), "relax.incar"),
         (os.path.join(hf_dir, "groundstate", "INCAR"), "supercell_relax.incar"),
@@ -90,7 +92,7 @@ def run(ctx):
         print(f"\n  [energy] Processing {e} eV —")
         run_command("rm -f RAMFILE", cwd=raman_dir, check_success=False)
         run_command(f"cp store_ramfile/RAMFILE_{e} RAMFILE", cwd=raman_dir)
-        raman_input = f"{ctx['raman_incident_pol']}\n{ctx['raman_scattered_pol']}\n{ctx['raman_surface_normal']}\n"
+        raman_input = f"{ctx.raman_incident_pol}\n{ctx.raman_scattered_pol}\n{ctx.raman_surface_normal}\n"
         input_file = os.path.join(raman_dir, ".raman_tensor_input")
         with open(input_file, "w") as f:
             f.write(raman_input)
@@ -148,16 +150,14 @@ def run(ctx):
         for f in glob.glob(os.path.join(raman_dir, glob_pat)):
             shutil.copy2(f, os.path.join(data_dir, os.path.basename(f)))
 
-    write_status("final", "completed", "Automation workflow complete")
-
     # ── --scratch: copy output/ from WORK_DIR to HOME ─────────────────
     if use_scratch:
         home_output = os.path.join(material_dir, "output")
         scratch_output = os.path.join(work_dir, "output")
         if os.path.exists(scratch_output):
-            run_command(f"mkdir -p {home_output}", cwd=material_dir)
-            run_command(f"cp -r {scratch_output}/* {home_output}/", cwd=material_dir, check_success=False)
+            shutil.copytree(scratch_output, home_output, dirs_exist_ok=True)
             print(f"\n  [scratch] Results saved to: {home_output}")
 
     write_status(step, "completed", "Post-processing done")
     print_step_result(step, ok=True, duration_s=time.time() - t_start)
+    write_status("final", "completed", "Automation workflow complete")

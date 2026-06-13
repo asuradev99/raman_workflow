@@ -1,4 +1,4 @@
-"""Step 4 — Supercell generation + ionic relaxation."""
+"""Step 2 — Supercell generation + ionic relaxation."""
 
 import os, time
 from util.io import run_command
@@ -13,10 +13,10 @@ from util.status import print_step_header, print_step_result
 
 
 def run(ctx):
-    write_status = ctx["write_status"]
-    step = ctx["_step"]
-    hf_dir = ctx["hffiles_dir"]
-    work_dir = ctx["work_dir"]
+    write_status = ctx.write_status
+    step = ctx.current_step
+    hf_dir = ctx.hffiles_dir
+    work_dir = ctx.work_dir
     print_step_header(step)
     write_status(step, "running", "Supercell generation + ionic relaxation")
     t_start = time.time()
@@ -26,7 +26,7 @@ def run(ctx):
     run_command(f"cp scf/CONTCAR {hf_dir}/POSCAR_unitcell", cwd=work_dir)
     check_no_selective_dynamics(os.path.join(hf_dir, "POSCAR_unitcell"), "POSCAR_unitcell")
     run_command(
-        f'phonopy -d --dim="{ctx["phonopy_dim"]}" --amplitude={ctx["phonopy_amplitude"]} -c POSCAR_unitcell',
+        f'phonopy -d --dim="{ctx.phonopy_dim}" --amplitude={ctx.phonopy_amplitude} -c POSCAR_unitcell',
         cwd=hf_dir,
     )
     spos_path = os.path.join(hf_dir, "SPOSCAR")
@@ -34,18 +34,18 @@ def run(ctx):
         raise FileNotFoundError(f"SPOSCAR not found in {hf_dir}")
     run_command(f"cp SPOSCAR {gs_dir}/POSCAR", cwd=hf_dir)
     print("  [setup] POSCAR-* + SPOSCAR in hf/")
-    if not ctx["start_from_supercell"]:
+    if not ctx.start_from_supercell:
         print("  [vasp] Supercell ionic relaxation...")
-        write_incar(os.path.join(gs_dir, "INCAR"), ctx["config"], "supercell_relax")
+        write_incar(os.path.join(gs_dir, "INCAR"), ctx.config, "supercell_relax")
         write_kpoints(
             os.path.join(gs_dir, "KPOINTS"),
             "K-points for supercell",
-            ctx["sup_relax_kpoints_mesh"],
-            ctx["sup_relax_kpoints_shift"],
+            ctx.sup_relax_kpoints_mesh,
+            ctx.sup_relax_kpoints_shift,
         )
         run_command(f"cp input/POTCAR {gs_dir}/", cwd=work_dir)
         run_command(
-            f"srun {ctx['srun_args']} {ctx['vasp_binary']} > supercell_relax.stdout",
+            f"srun {ctx.srun_args} {ctx.vasp_binary} > supercell_relax.stdout",
             cwd=gs_dir,
             check_success=False,
         )
@@ -55,9 +55,9 @@ def run(ctx):
             print("  WARNING: Supercell relaxation reached NSW=100 limit")
     run_command(f"cp SPOSCAR {hf_dir}/CONTCAR_supercell_relaxed", cwd=hf_dir)
     run_command(f"cp SPOSCAR {hf_dir}/CONTCAR", cwd=hf_dir)
-    if not ctx["start_from_supercell"]:
+    if not ctx.start_from_supercell:
         run_command(f"cp CONTCAR {gs_dir}/CONTCAR_relaxed", cwd=gs_dir, check_success=False)
-    if ctx["start_from_supercell"]:
+    if ctx.start_from_supercell:
         write_status(step, "completed", "Supercell displacements (relaxation skipped)")
     else:
         write_status(step, "completed", "Supercell relaxed — CHGCAR/WAVECAR in hf/groundstate/")
