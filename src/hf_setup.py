@@ -19,8 +19,21 @@ def run(ctx):
     write_status(step, "running", "hf/ directory setup")
     t_start = time.time()
 
-    # Copy POSCAR, INCAR, KPOINTS, POTCAR to hf/
     run_command(f"mkdir -p {hf_dir}", cwd=work_dir)
+
+    # ── Caching guard: skip if hf_POSCAR-* dirs already exist ─────────────
+    existing_hf_dirs = [
+        d for d in os.listdir(hf_dir)
+        if d.startswith("hf_POSCAR-") and os.path.isdir(os.path.join(hf_dir, d))
+    ]
+    if existing_hf_dirs:
+        write_status(step, "completed",
+                     f"hf/ setup already done ({len(existing_hf_dirs)} dirs, cached)")
+        print_step_result(step, ok=True, duration_s=time.time() - t_start,
+                          message=f"{len(existing_hf_dirs)} hf dirs exist (cached)")
+        return
+
+    # Copy POSCAR, INCAR, KPOINTS, POTCAR to hf/
     run_command(f"cp scf/CONTCAR {hf_dir}/POSCAR_unitcell", cwd=work_dir)
     write_incar(os.path.join(hf_dir, "INCAR"), ctx.config, "hf")
     write_kpoints(os.path.join(hf_dir, "KPOINTS"), "K-points for force-constant",
@@ -42,15 +55,16 @@ def run(ctx):
     # WAVECAR + CHGCAR symlinks in displacement dirs
     gs_dir = os.path.join(hf_dir, "groundstate")
     if ctx.start_from_supercell:
-        # groundstate/ not set up by Step 2 — populate it now so VASP can run.
+        # groundstate/ geometry reference only — VASP doesn't run here.
+        # POSCAR is already set by supercell.py (cp SPOSCAR groundstate/POSCAR).
+        # Add CHGCAR/WAVECAR symlinks so groundstate/ is valid if ever run manually.
         if not os.path.isdir(gs_dir):
             run_command(f"mkdir -p {gs_dir}", cwd=work_dir)
-        for fname in ("INCAR", "KPOINTS"):
-            dst = os.path.join(gs_dir, fname)
-            if os.path.exists(dst) or os.path.islink(dst):
-                os.unlink(dst)
-            shutil.copy2(os.path.join(hf_dir, fname), dst)
-        run_command(f"cp POSCAR_unitcell {gs_dir}/POSCAR", cwd=hf_dir)
+        for fname in ("CHGCAR", "WAVECAR"):
+            link = os.path.join(gs_dir, fname)
+            if os.path.islink(link) or os.path.exists(link):
+                os.remove(link)
+            os.symlink(f"../../scf/{fname}", link)
         src_subdir = "scf"
     else:
         src_subdir = "groundstate"

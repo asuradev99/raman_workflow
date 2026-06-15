@@ -80,10 +80,10 @@ while true; do
         exit 0
     fi
 
-    # Exit code 42 = salloc timeout / incomplete — retry from resume point
+    # Exit code 42 = salloc timeout or sbatch preemption — retry from resume point
     # Any other non-zero exit code = fatal error
     if [ $EXIT_CODE -eq 42 ]; then
-        echo "=== Salloc timed out — retrying from resume point (attempt $ATTEMPT) ==="
+        echo "=== Job incomplete (preempted/timed out) — retrying from resume point (attempt $ATTEMPT) ==="
         RESTART_FLAG=""
         continue
     fi

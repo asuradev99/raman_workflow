@@ -363,13 +363,19 @@ elif COMPUTE_MODE == "sbatch_serial" and not (INSIDE_SALLOC_FLAG or SALLOC_STEPS
         f"export RAMAN_PROJECT_DIR={os.environ.get('RAMAN_PROJECT_DIR', '')}",
         f"{python_bin} -m src.automation_raman_analysis {' '.join(flags)}",
     ])
-    print(f"\n  [sbatch-serial] Submitting full pipeline as single sbatch…")
+    sbatch_cfg = CONFIG.get("compute_modes", {}).get("sbatch_serial", {})
+    _walltime = sbatch_cfg.get("walltime", "04:00:00")
+    _qos = sbatch_cfg.get("qos", "preempt")
+    _nodes = sbatch_cfg.get("nodes", 4)
+    print(f"\n  [sbatch-serial] Submitting full pipeline as single sbatch "
+          f"(nodes={_nodes}, walltime={_walltime}, qos={_qos})…")
     ok = submit_sbatch_wrapper(
         wrapper,
         job_name=f"raman_{MATERIAL_NAME}",
         output_dir=WORK_DIR,
-        walltime="04:00:00",
-        nodes=1,
+        walltime=_walltime,
+        qos=_qos,
+        nodes=_nodes,
     )
     if not ok:
         print("  [sbatch-serial] sbatch job failed. Check slurm logs.")
@@ -387,7 +393,7 @@ elif COMPUTE_MODE == "sbatch_serial" and not (INSIDE_SALLOC_FLAG or SALLOC_STEPS
         print(f"  [sbatch-serial] sbatch COMPLETED — pipeline INCOMPLETE (next: step {next_step}).")
         print(f"  [sbatch-serial] Log: {STATUS_FILE}")
         print(f"{sep}\n")
-        sys.exit(1)
+        sys.exit(42)  # 42 = incomplete/preempted — triggers auto-retry in run_raman_pipeline_auto.sh
 
 # ── Step dispatch ─────────────────────────────────────────────────────────────
 for step in PIPELINE:

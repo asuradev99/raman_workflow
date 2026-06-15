@@ -19,7 +19,9 @@ def run(ctx):
     write_status(step, "running", f"VASP force constants ({compute_mode})")
     t_start = time.time()
 
-    all_dirs = list_hf_dirs(hf_dir, include_groundstate=True)
+    # Include groundstate only when start_from_supercell=False (step 2 ran VASP there).
+    # When start_from_supercell=True, groundstate/ holds geometry only — VASP never runs.
+    all_dirs = list_hf_dirs(hf_dir, include_groundstate=not ctx.start_from_supercell)
     todo = [d for d in all_dirs if not is_calculation_complete(d)]
 
     if not todo:
@@ -33,12 +35,21 @@ def run(ctx):
     # ══════════════════════════════════════════════════════════════════════════
 
     if compute_mode in ("sbatch_parallel", "sbatch"):
-        print(f"  [sbatch_parallel] Submitting {len(todo)}/{len(all_dirs)} hf dirs…")
-        ok = submit_many(
-            os.path.join(scripts_root, "sbatch_hf_dir.sh"),
-            todo, job_name_prefix="hf",
-            system_paths=ctx.system_paths,
-        )
+        script_path = os.path.join(scripts_root, "sbatch_hf_dir.sh")
+        max_retries = getattr(ctx, "vasp_max_restarts", 3)
+        ok = False
+        for attempt in range(1, max_retries + 1):
+            incomplete = [d for d in all_dirs if not is_calculation_complete(d)]
+            if not incomplete:
+                ok = True
+                break
+            print(f"  [sbatch_parallel] Attempt {attempt}/{max_retries}: "
+                  f"submitting {len(incomplete)}/{len(all_dirs)} dirs…")
+            submit_many(script_path, incomplete, job_name_prefix="hf",
+                        system_paths=ctx.system_paths,
+                        srun_args=ctx.vasp_srun_per_dir,
+                        sbatch_args=ctx.vasp_sbatch_per_dir)
+            # submit_many only confirms jobs left squeue — re-check actual VASP completion above
 
     elif compute_mode == "sbatch_serial":
         if ctx.inside_salloc:
@@ -80,7 +91,7 @@ def run(ctx):
                 todo, build_serial_vasp_wrapper(ctx.system_paths),
                 vasp_binary=ctx.vasp_binary,
                 work_dir=ctx.work_dir,
-                srun_args=ctx.vasp_srun_per_dir,
+                srun_args=ctx.srun_args,
                 salloc_args=ctx.salloc_per_dir,
             )
 

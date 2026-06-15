@@ -56,26 +56,28 @@ def run_hf_loop(hffiles_dir, vasp_script_path, max_restarts,
                 print("  ERROR: orchestration script created no hf_POSCAR-* directories.")
                 return False
 
-        # On retry, only process incomplete directories
-        if i > 0:
-            incomplete = [d for d in all_hf if not is_calculation_complete(os.path.join(hffiles_dir, d))]
-            if not incomplete:
-                print("  All hf_POSCAR-* directories already complete.")
-                return True
+        # ── Check completion on every iteration (including the first) ────
+        incomplete = [d for d in all_hf
+                      if not is_calculation_complete(os.path.join(hffiles_dir, d))]
+        if not incomplete:
+            print("  All hf_POSCAR-* directories already complete.")
+            return True
+        if len(incomplete) < len(all_hf):
             print(f"  Skipping {len(all_hf) - len(incomplete)} completed dirs, "
-                  f"retrying {len(incomplete)} incomplete: "
-                  f"{', '.join(incomplete[:5])}"
-                  f"{'...' if len(incomplete) > 5 else ''}")
-            all_hf = incomplete
+                  f"running {len(incomplete)} incomplete: "
+                  f"{', '.join(incomplete[:5])}{'...' if len(incomplete) > 5 else ''}")
 
-        # ── Run VASP in the (possibly filtered) set of directories ───────
+        # ── Run VASP in incomplete dirs only ──────────────────────────────
         if cpu_flag:
-            _run_serial_dirs(all_hf, hffiles_dir, srun_args, vasp_binary)
+            _run_serial_dirs(incomplete, hffiles_dir, srun_args, vasp_binary)
         elif hf_parallel:
-            _run_hf_parallel(all_hf, hffiles_dir, srun_args, vasp_binary, vasp_script_path)
+            _run_hf_parallel(incomplete, hffiles_dir, srun_args, vasp_binary, vasp_script_path)
         else:
-            _run_gpu_serial(all_hf, hffiles_dir, srun_args, vasp_binary,
-                            vasp_script_path, first_iteration=(i == 0))
+            # Fresh start (all dirs incomplete on first try): delegate to shell script.
+            # Partial resume: bypass shell script (runs everything) and use direct srun.
+            use_shell = (i == 0 and len(incomplete) == len(all_hf))
+            _run_gpu_serial(incomplete, hffiles_dir, srun_args, vasp_binary,
+                            vasp_script_path, first_iteration=use_shell)
 
         # ── Validate ─────────────────────────────────────────────────────
         hf_dirs = [os.path.basename(d) for d in list_hf_dirs(hffiles_dir)]

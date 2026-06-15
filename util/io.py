@@ -18,6 +18,7 @@ class Tee:
 
     def write(self, data):
         self.stdout.write(data)
+        self.stdout.flush()
         self.log.write(data)
         self.log.flush()
         if self.out:

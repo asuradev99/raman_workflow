@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-RAMAN_DIR="${RAMAN_DIR:-/pscratch/sd/e/easuresh/vasp_calculations/hBN_PBEsol_6x6x1_defect/raman}"
+RAMAN_DIR="${RAMAN_DIR:?RAMAN_DIR must be set (exported by pipeline via --export)}"
 VASP="${VASP_BINARY:-/global/cfs/cdirs/m526/liangbo/bin/gpu/vasp_std}"
 
 source ~/.bashrc 2>/dev/null || true

@@ -7,6 +7,17 @@ from util.kpoints import write_kpoints
 from util.status import print_step_header, print_step_result
 
 
+def _resume_contcar(scf_dir, context=""):
+    """Copy CONTCAR → POSCAR if CONTCAR exists from a prior crash, return True if done."""
+    contcar = os.path.join(scf_dir, "CONTCAR")
+    if os.path.exists(contcar) and os.path.getsize(contcar) > 0:
+        shutil.copy2(contcar, os.path.join(scf_dir, "POSCAR"))
+        suffix = f" ({context})" if context else ""
+        print(f"  [resume] CONTCAR → POSCAR{suffix} — resuming prior crash")
+        return True
+    return False
+
+
 def _relax_stage(ctx, stage, scf_dir, label):
     """Run a single VASP relaxation stage and return (ok, duration)."""
     t0 = time.time()
@@ -59,17 +70,17 @@ def run(ctx):
     )
 
     if has_defect_pair:
-        # ── Resume-aware: check if ISIF2 already saved from previous run ────
-        contcar_isif2 = os.path.join(scf_dir, "CONTCAR_ISIF2")
-        skip_isif2 = os.path.exists(contcar_isif2)
+        # ── Resume-aware: check if relax 1 CONTCAR already saved from prior run ──
+        contcar_relax1 = os.path.join(scf_dir, "CONTCAR_ISIF2")
+        skip_relax1 = os.path.exists(contcar_relax1)
 
-        if skip_isif2:
-            print(f"  [defect] Found existing CONTCAR_ISIF2 — skipping ISIF2, resuming at ISIF3")
+        if skip_relax1:
+            print(f"  [defect] Found existing relax 1 CONTCAR — skipping relax 1, resuming at relax 2")
 
-        # ── Stage 1: ISIF=2 (lattice fixed, atoms only) ──────────────────────
-        if not skip_isif2:
-            print_step_header(step, description=f"Step {step}a — Defect ISIF=2 (atoms only)")
-            write_status(step, "running", "Defect ISIF=2 relaxation")
+        # ── Stage 1: lattice-fixed atomic relaxation ──────────────────────────
+        if not skip_relax1:
+            print_step_header(step, description=f"Step {step}a — Defect relax 1 (lattice fixed)")
+            write_status(step, "running", "Defect relax 1 (lattice fixed)")
             t_total_start = time.time()
 
             write_kpoints(
@@ -79,66 +90,76 @@ def run(ctx):
                 ctx.scf_kpoints_shift,
             )
             print(f"  [setup] Wrote KPOINTS to scf/")
+            _resume_contcar(scf_dir, "relax1")
 
-            ok1, dt1 = _relax_stage(ctx, "defect_relax_fixed", scf_dir, "defect-ISIF2")
+            ok1, dt1 = _relax_stage(ctx, "defect_relax_fixed", scf_dir, "defect-relax1")
             if not ok1:
                 msg = (
-                    f"Defect ISIF=2 relaxation failed in {scf_dir}. "
+                    f"Defect relax 1 failed in {scf_dir}. "
                     f"Check {scf_dir}/relaxation.stdout."
                 )
-                print_step_result(step, ok=False, duration_s=dt1, message="ISIF2 failed")
+                print_step_result(step, ok=False, duration_s=dt1, message="Relax 1 failed")
                 raise RuntimeError(msg)
 
-            # Save the ISIF2-relaxed CONTCAR for reference
-            shutil.copy2(os.path.join(scf_dir, "CONTCAR"), contcar_isif2)
-            print(f"  [defect] Saved ISIF2 CONTCAR → CONTCAR_ISIF2 ({os.path.getsize(contcar_isif2)} bytes)")
+            # Save relax 1 CONTCAR before relax 2 overwrites it
+            shutil.copy2(os.path.join(scf_dir, "CONTCAR"), contcar_relax1)
+            print(f"  [defect] Saved relax 1 CONTCAR → CONTCAR_ISIF2 ({os.path.getsize(contcar_relax1)} bytes)")
 
-            # Save ISIF2 output files before ISIF3 overwrites them
+            # Save relax 1 output files before relax 2 overwrites them
             for fname in ("OUTCAR", "OSZICAR"):
                 src = os.path.join(scf_dir, fname)
                 dst = os.path.join(scf_dir, f"{fname}_ISIF2")
                 if os.path.exists(src):
                     shutil.copy2(src, dst)
-                    print(f"  [defect] Saved ISIF2 {fname} → {fname}_ISIF2 ({os.path.getsize(dst)} bytes)")
+                    print(f"  [defect] Saved relax 1 {fname} → {fname}_ISIF2 ({os.path.getsize(dst)} bytes)")
 
-            print(f"  [defect] ISIF=2 converged — starting ISIF=3")
+            print(f"  [defect] Relax 1 converged — starting relax 2")
         else:
             t_total_start = time.time()
-            # Still need KPOINTS for ISIF3 stage
+            # Still need KPOINTS for relax 2
             write_kpoints(
                 os.path.join(scf_dir, "KPOINTS"),
                 "K-points for defect supercell relaxation",
                 ctx.scf_kpoints_mesh,
                 ctx.scf_kpoints_shift,
             )
-            print(f"  [defect] Resuming at ISIF3 — ISIF2 already converged in prior run")
+            print(f"  [defect] Resuming at relax 2 — relax 1 already converged in prior run")
 
-        # ── Stage 2: ISIF=3 (full relaxation from ISIF2 positions) ────────────
+        # ── Stage 2: full relaxation from stage 1 positions ──────────────────
         step2 = step + 0.5  # sub-step key for log table
-        print_step_header(step, description=f"Step {step}b — Defect ISIF=3 (atoms + lattice)")
-        write_status(step2, "running", "Defect ISIF=3 relaxation")
+        print_step_header(step, description=f"Step {step}b — Defect relax 2 (full)")
+        write_status(step2, "running", "Defect relax 2 (full)")
 
-        # ISIF2 CONTCAR → POSCAR for the ISIF3 run
-        poscar_src = contcar_isif2 if os.path.exists(contcar_isif2) else os.path.join(scf_dir, "CONTCAR")
-        shutil.copy2(poscar_src, os.path.join(scf_dir, "POSCAR"))
-        print(f"  [defect] CONTCAR → POSCAR for ISIF3 stage")
+        # Set POSCAR for relax 2: prefer CONTCAR if it has relax 2 progress (crash resume)
+        contcar_path = os.path.join(scf_dir, "CONTCAR")
+        contcar_has_relax2 = (
+            os.path.exists(contcar_path)
+            and os.path.getsize(contcar_path) > 0
+            and os.path.getmtime(contcar_path) > os.path.getmtime(contcar_relax1)
+        )
+        if contcar_has_relax2:
+            shutil.copy2(contcar_path, os.path.join(scf_dir, "POSCAR"))
+            print(f"  [resume] CONTCAR → POSCAR (relax 2) — resuming prior crash")
+        else:
+            shutil.copy2(contcar_relax1, os.path.join(scf_dir, "POSCAR"))
+            print(f"  [defect] CONTCAR_ISIF2 → POSCAR for relax 2")
 
-        ok2, dt2 = _relax_stage(ctx, "defect_relax_full", scf_dir, "defect-ISIF3")
+        ok2, dt2 = _relax_stage(ctx, "defect_relax_full", scf_dir, "defect-relax2")
         if not ok2:
             msg = (
-                f"Defect ISIF=3 relaxation failed in {scf_dir}. "
+                f"Defect relax 2 failed in {scf_dir}. "
                 f"Check {scf_dir}/relaxation.stdout."
             )
-            write_status(step2, "failed", "Defect ISIF=3 failed")
-            print_step_result(step, ok=False, duration_s=dt2, message="ISIF3 failed")
+            write_status(step2, "failed", "Defect relax 2 failed")
+            print_step_result(step, ok=False, duration_s=dt2, message="Relax 2 failed")
             raise RuntimeError(msg)
 
-        write_status(step2, "completed", "Defect ISIF=3 converged")
-        write_status(step, "completed", "Defect relaxation complete (ISIF2+ISIF3)")
+        write_status(step2, "completed", "Defect relax 2 converged")
+        write_status(step, "completed", "Defect relaxation complete (relax1+relax2)")
         total_dt = time.time() - t_total_start
         print_step_result(
             step, ok=True, duration_s=total_dt,
-            message="ISIF2+ISIF3 converged"
+            message="Relax 1+2 converged"
         )
 
     else:
@@ -154,6 +175,7 @@ def run(ctx):
             ctx.scf_kpoints_shift,
         )
         print(f"  [setup] Wrote unit cell KPOINTS ({ctx.scf_kpoints_mesh}) to scf/")
+        _resume_contcar(scf_dir)
 
         ok, dt = _relax_stage(ctx, "relax", scf_dir, "step-1")
         if not ok:

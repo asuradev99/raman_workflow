@@ -84,6 +84,7 @@ class PipelineContext:
     vasp_max_restarts: int = field(init=False)
     hf_parallel: bool = field(init=False)
     vasp_srun_per_dir: str = field(init=False)
+    vasp_sbatch_per_dir: str = field(init=False)
     salloc_relax: str = field(init=False)
     salloc_per_dir: str = field(init=False)
     start_from_supercell: bool = field(init=False)
@@ -118,7 +119,8 @@ class PipelineContext:
         self.raman_surface_normal = cfg["raman_tensor"]["surface_normal"]
         self.vasp_max_restarts = cfg["vasp_loop"]["max_restarts"]
         self.hf_parallel = cfg.get("hf_parallel", False)
-        self.vasp_srun_per_dir = mode_cfg.get("srun_per_dir", "--gpus=1 --ntasks=1")
+        self.vasp_srun_per_dir = mode_cfg.get("srun_per_dir", "")
+        self.vasp_sbatch_per_dir = mode_cfg.get("sbatch_per_dir", "")
         self.salloc_relax = mode_cfg.get("salloc") or mode_cfg.get("salloc_relax", "")
         self.salloc_per_dir = mode_cfg.get("salloc") or mode_cfg.get("salloc_per_dir", "")
         self.start_from_supercell = cfg.get("start_from_supercell", False)

@@ -42,12 +42,20 @@ def run(ctx):
     # ══════════════════════════════════════════════════════════════════════════
 
     if compute_mode in ("sbatch_parallel", "sbatch"):
-        print(f"  [sbatch_parallel] Submitting {len(todo)}/{len(ra_dirs)} raman dirs…")
-        ok = submit_many(
-            os.path.join(scripts_root, "sbatch_raman_dir.sh"),
-            todo, job_name_prefix="raman",
-            system_paths=ctx.system_paths,
-        )
+        script_path = os.path.join(scripts_root, "sbatch_raman_dir.sh")
+        max_retries = getattr(ctx, "vasp_max_restarts", 3)
+        ok = False
+        for attempt in range(1, max_retries + 1):
+            incomplete = [d for d in ra_dirs if not is_calculation_complete(d)]
+            if not incomplete:
+                ok = True
+                break
+            print(f"  [sbatch_parallel] Attempt {attempt}/{max_retries}: "
+                  f"submitting {len(incomplete)}/{len(ra_dirs)} raman dirs…")
+            submit_many(script_path, incomplete, job_name_prefix="raman",
+                        system_paths=ctx.system_paths,
+                        srun_args=ctx.vasp_srun_per_dir,
+                        sbatch_args=ctx.vasp_sbatch_per_dir)
 
     elif compute_mode == "sbatch_serial":
         if ctx.inside_salloc:
@@ -99,7 +107,7 @@ def run(ctx):
                 todo, build_serial_vasp_wrapper(ctx.system_paths),
                 vasp_binary=ctx.vasp_binary,
                 work_dir=ctx.work_dir,
-                srun_args=ctx.vasp_srun_per_dir,
+                srun_args=ctx.srun_args,
                 salloc_args=ctx.salloc_per_dir,
             )
 

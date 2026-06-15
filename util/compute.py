@@ -1,6 +1,7 @@
 """Compute provisioning — salloc pipe + sbatch launcher + polling."""
 
 import os
+import shlex
 import subprocess
 import tempfile
 import time
@@ -125,31 +126,43 @@ def _sbatch_exports(system_paths, extra=None):
     return ",".join(exports)
 
 
+def _submit_one_job(script_path, job_name, exports_str, sbatch_args_list, output_dir=None):
+    """Run sbatch for one job. Returns job ID string, or None on failure."""
+    cmd = ["sbatch", f"--job-name={job_name}", f"--export={exports_str}"]
+    if output_dir:
+        cmd += [f"--output={output_dir}/slurm_%j.out",
+                f"--error={output_dir}/slurm_%j.err"]
+    cmd += sbatch_args_list
+    cmd.append(script_path)
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        print(f"  [compute] ERROR submitting {job_name}: {result.stderr.strip()}")
+        return None
+    return result.stdout.strip().split()[-1]
+
+
 def submit_many(script_path, directories, job_name_prefix="vasp",
-                qos="preempt", system_paths=None):
-    """Submit one sbatch job per directory, poll until all finish."""
+                qos="preempt", system_paths=None,
+                srun_args="", sbatch_args=""):
+    """Submit one sbatch job per directory, poll until all finish.
+
+    srun_args  — passed as $SRUN_ARGS env var inside the job (from srun_per_dir config).
+    sbatch_args — sbatch resource flags (nodes, gpus, time, qos, constraint)
+                  sourced from sbatch_per_dir config; overrides any #SBATCH headers.
+    """
     n_total = len(directories)
     if n_total == 0:
         return True
 
-    exports = _sbatch_exports(system_paths or {})
+    sbatch_args_list = shlex.split(sbatch_args) if sbatch_args else []
+    base_extra = {"SRUN_ARGS": srun_args}  # always export — batch scripts use set -u
+
     job_ids = []
     for i, d in enumerate(directories):
         job_name = f"{job_name_prefix}_{i:03d}"
-        result = subprocess.run(
-            ["sbatch",
-             f"--job-name={job_name}",
-             f"--export={exports},DIR={d}",
-             f"--output={d}/slurm_%j.out",
-             f"--error={d}/slurm_%j.err",
-             script_path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True,
-        )
-        if result.returncode != 0:
-            print(f"  [compute] ERROR submitting {job_name}: {result.stderr.strip()}")
-        else:
-            jid = result.stdout.strip().split()[-1]
+        exports_str = _sbatch_exports(system_paths or {}, extra={**base_extra, "DIR": d})
+        jid = _submit_one_job(script_path, job_name, exports_str, sbatch_args_list, output_dir=d)
+        if jid:
             job_ids.append(jid)
             print(f"  [compute] Submitted {job_name} ({i+1}/{n_total}): job {jid} → {d}")
 
@@ -188,52 +201,49 @@ def _check_done(job_ids):
 
 
 def submit_sbatch_wrapper(wrapper_script, job_name="vasp_pipe",
-                          nodes=1, walltime="02:00:00",
+                          nodes=1, walltime="48:00:00",
                           qos="preempt", account="m526",
-                          extra_exports=None, output_dir=None):
+                          ntasks_per_node=4, cpus_per_task=32,
+                          extra_exports=None, output_dir=None,
+                          sbatch_args=""):
     """Write *wrapper_script* to a temp file, submit via sbatch, poll until done.
+
+    sbatch_args — resource flags as a single string (e.g. from a sbatch_relax config
+                  key).  When provided, overrides the individual nodes/walltime/qos/
+                  account params.  When omitted, those params are used to build the
+                  resource args.
 
     Returns True if the job completed successfully.
     """
+    if sbatch_args:
+        sbatch_args_list = shlex.split(sbatch_args)
+    else:
+        sbatch_args_list = [
+            f"--nodes={nodes}",
+            f"--ntasks-per-node={ntasks_per_node}",
+            f"--cpus-per-task={cpus_per_task}",
+            f"--time={walltime}",
+            f"--qos={qos}",
+            f"--account={account}",
+            "--constraint=gpu",
+            "--gpus-per-node=4",
+        ]
+
+    exports_str = _sbatch_exports({}, extra=extra_exports or {})
+
     with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
         f.write(wrapper_script)
         script_path = f.name
 
-    exports = ["ALL"]
-    if extra_exports:
-        exports.extend(f"{k}={v}" for k, v in extra_exports.items())
-
-    sbatch_cmd = [
-        "sbatch",
-        f"--job-name={job_name}",
-        f"--nodes={nodes}",
-        f"--time={walltime}",
-        f"--qos={qos}",
-        f"--account={account}",
-        "--constraint=gpu",
-        "--gpus-per-node=4",
-        f"--export={','.join(exports)}",
-    ]
-    if output_dir:
-        sbatch_cmd.append(f"--output={output_dir}/slurm_%j.out")
-        sbatch_cmd.append(f"--error={output_dir}/slurm_%j.err")
-    sbatch_cmd.append(script_path)
-
-    result = subprocess.run(sbatch_cmd,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        print(f"  [compute] ERROR submitting {job_name}: {result.stderr.strip()}")
-        os.unlink(script_path)
-        return False
-
-    jid = result.stdout.strip().split()[-1]
-    print(f"  [compute] Submitted {job_name} (job {jid}), waiting…")
-    ok = _poll_jobs([jid])
-    os.unlink(script_path)
-    return ok
+    try:
+        jid = _submit_one_job(script_path, job_name, exports_str, sbatch_args_list, output_dir)
+        if jid is None:
+            return False
+        print(f"  [compute] Submitted {job_name} (job {jid}), waiting…")
+        return _poll_jobs([jid])
+    finally:
+        if os.path.exists(script_path):
+            os.unlink(script_path)
 
 
 def run_serial_in_salloc_with_retry(directories, wrapper_template,

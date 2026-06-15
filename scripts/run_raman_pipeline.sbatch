@@ -1,10 +1,12 @@
 #!/bin/bash
-#SBATCH -N 1
+#SBATCH -N 20
 #SBATCH -C gpu
 #SBATCH -q preempt
-#SBATCH -t 08:00:00
+#SBATCH -t 04:00:00
 #SBATCH -A m526
 #SBATCH --gpus-per-node=4
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=32
 #SBATCH --job-name=raman_pipeline
 # NOTE: --output/--error defaults below land in ~/log/. The preferred
 # submission path is submit_parallel_preempt.sh, which overrides these
@@ -13,7 +15,6 @@
 #SBATCH --error=/global/homes/e/easuresh/log/raman_%j.err
 #SBATCH --mail-type=BEGIN,END,FAIL,REQUEUE
 #SBATCH --mail-user=ethanaditya@gmail.com
-#SBATCH --time-min=02:00:00
 #
 # =============================================================================
 #  Raman Pipeline — Slurm Batch Job
@@ -144,8 +145,8 @@ echo "Working directory: $(pwd)"
 # initial header (above) and final cleanup (trap).
 
 export PYTHONPATH="$PIPELINE_DIR:${PYTHONPATH:-}"
-echo "Running: python $AUTOMATION_SCRIPT $RESTART_FLAG $CPU_FLAG $SCRATCH_FLAG"
-python "$AUTOMATION_SCRIPT" $RESTART_FLAG $CPU_FLAG $SCRATCH_FLAG
+echo "Running: python $AUTOMATION_SCRIPT --inside-salloc $RESTART_FLAG $CPU_FLAG $SCRATCH_FLAG"
+python "$AUTOMATION_SCRIPT" --inside-salloc $RESTART_FLAG $CPU_FLAG $SCRATCH_FLAG
 
 echo "============================================"
 echo " Pipeline completed successfully."
