@@ -146,24 +146,3 @@ def split_srun_args(srun_args, num_dirs):
     return result
 
 
-def get_mode_setting(config, mode, key, default=None):
-    """Get a setting from ``compute_modes.<mode>.<key>`` with fallback.
-
-    Falls back to ``vasp_srun.<key>`` (old config format) if
-    ``compute_modes`` is not present.
-    """
-    modes = config.get("compute_modes", {})
-    if modes and mode in modes:
-        return modes[mode].get(key, default)
-    # Fallback: old vasp_srun section
-    vs = config.get("vasp_srun", {})
-    return vs.get(key, default)
-
-
-def get_mode_salloc(config, mode, key):
-    """Get a salloc arg string from ``compute_modes.<mode>.<key>``.
-
-    Returns the full salloc argument string (without ``salloc`` prefix),
-    e.g. ``-N 4 -C gpu --gpus-per-node=4 -t 02:00:00 --qos=interactive -A m526``.
-    """
-    return get_mode_setting(config, mode, key, "")

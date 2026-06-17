@@ -29,9 +29,9 @@ echo "=== sbatch_all_hf: $HF_DIR ==="
 cd "$HF_DIR" || exit 1
 
 # Run groundstate first (needed for CHGCAR/WAVECAR in displacement dirs)
-if [ -d groundstate ] && [ ! -f groundstate/OUTCAR ] || ! grep -q "General timing" groundstate/OUTCAR 2>/dev/null; then
+if [ -d groundstate ] && { [ ! -f groundstate/OUTCAR ] || ! grep -q "General timing" groundstate/OUTCAR 2>/dev/null; }; then
     echo "--- groundstate ---"
-    cd groundstate && srun --gpus=1 --ntasks=1 "$VASP" > relaxation.stdout && cd ..
+    cd groundstate && srun ${SRUN_ARGS:---gpus=1 --ntasks=1} "$VASP" > relaxation.stdout && cd ..
 fi
 
 # Run each hf_POSCAR-* serially
@@ -42,7 +42,7 @@ for d in hf_POSCAR-*; do
         continue
     fi
     echo "--- $d ---"
-    cd "$d" && srun --gpus=1 --ntasks=1 "$VASP" > relaxation.stdout && cd ..
+    cd "$d" && srun ${SRUN_ARGS:---gpus=1 --ntasks=1} "$VASP" > relaxation.stdout && cd ..
 done
 
 echo "=== sbatch_all_hf: DONE ==="

@@ -8,39 +8,71 @@ from . import (
     scf_relax, supercell, hf_setup, force_constants,
     phonon_post, raman_prep, resonant_vasp, post_process,
 )
+from util.status import relax_labels
+
+# Step names that must run inside the salloc allocation (sbatch_parallel
+# auto-provision mode) — everything after these runs on the login node via
+# sbatch. Identified by `name` (a stable slug), never by step number.
+SALLOC_REQUIRED_STEP_NAMES = frozenset({"scf_relax", "supercell", "hf_setup"})
 
 
 @dataclass(frozen=True)
 class Step:
-    """Immutable descriptor for one pipeline step."""
-    number: int
-    name: str          # slug used in dispatch log lines
-    description: str   # human-readable label
+    """Immutable descriptor for one pipeline step.
+
+    Step *numbers* are never part of a Step's identity — they're purely a
+    cosmetic, 1-based display position computed fresh at render time from
+    where this step's label(s) fall in EXPECTED_LABELS (see util/status.py).
+    All resume/completion logic keys off `labels` instead.
+
+    `labels` is either a static list (steps with exactly one label) or a
+    callable `(config, start_from_supercell) -> list[str]` for steps whose
+    label(s) depend on config — currently only the relax step, which uses
+    one label normally or two for the defect two-stage relax.
+    """
+    name: str           # stable slug used in dispatch log lines + salloc boundary checks
+    labels: Any          # list[str] OR Callable[[dict, bool], list[str]]
     _run: Callable[[PipelineContext], None]
 
     def run(self, ctx: PipelineContext) -> None:
         self._run(ctx)
 
+    def resolved_labels(self, config: dict, start_from_supercell: bool) -> list:
+        if callable(self.labels):
+            return self.labels(config, start_from_supercell)
+        return list(self.labels)
+
 
 PIPELINE: list[Step] = [
-    Step(1, "scf_relax",     "Initial VASP relaxation",          scf_relax.run),
-    Step(2, "supercell",     "Supercell generation + relaxation", supercell.run),
-    Step(3, "hf_setup",      "hf/ directory setup",              hf_setup.run),
-    Step(4, "force_consts",  "VASP force constants",             force_constants.run),
-    Step(5, "phonon_post",   "Phonon postprocessing",            phonon_post.run),
-    Step(6, "raman_prep",    "Raman setup + displacements",      raman_prep.run),
-    Step(7, "resonant_vasp", "Resonant VASP (dielectric)",       resonant_vasp.run),
-    Step(8, "post_process",  "Post-processing + output",         post_process.run),
+    Step("scf_relax",     relax_labels,                            scf_relax.run),
+    Step("supercell",     ["Supercell generation + relaxation"],   supercell.run),
+    Step("hf_setup",      ["hf/ directory setup"],                 hf_setup.run),
+    Step("force_consts",  ["VASP force constants"],                force_constants.run),
+    Step("phonon_post",   ["Phonon postprocessing"],                phonon_post.run),
+    Step("raman_prep",    ["Raman setup + displacements"],          raman_prep.run),
+    Step("resonant_vasp", ["Resonant VASP (dielectric)"],           resonant_vasp.run),
+    Step("post_process",  ["Post-processing + output"],             post_process.run),
 ]
 
-STEP_BY_NUMBER: dict[int, Step] = {s.number: s for s in PIPELINE}
+
+def expected_labels(config: dict, start_from_supercell: bool) -> list:
+    """Full ordered label list for this material's config.
+
+    Used to seed the status table (including not-yet-started rows) and as
+    the canonical resume sequence — the single source of truth for "what
+    are all the steps and what order do they run in."
+    """
+    labels: list = []
+    for step in PIPELINE:
+        labels.extend(step.resolved_labels(config, start_from_supercell))
+    return labels
+
 
 
 @dataclass
 class PipelineContext:
     """Typed context passed to every pipeline step.
 
-    Construct via ``build_context()`` — do not instantiate directly.
     All YAML-derived fields are extracted in ``__post_init__`` so step modules
     never touch the raw config dict for scalar lookups.
     """
@@ -59,7 +91,6 @@ class PipelineContext:
     cpu_flag: bool
     scratch_flag: bool
     run_relaxation: Any   # Callable — typed as Any to avoid circular import with util
-    vasp_loop_fn: Any     # Callable
     write_status: Any     # Callable
     inside_salloc: bool = False
 
@@ -85,6 +116,7 @@ class PipelineContext:
     hf_parallel: bool = field(init=False)
     vasp_srun_per_dir: str = field(init=False)
     vasp_sbatch_per_dir: str = field(init=False)
+    vasp_gpus_per_dir: int = field(init=False)
     salloc_relax: str = field(init=False)
     salloc_per_dir: str = field(init=False)
     start_from_supercell: bool = field(init=False)
@@ -93,7 +125,10 @@ class PipelineContext:
     eigvec_band_points: Any = field(init=False)
 
     # ── Mutable dispatch state (set by the dispatch loop, not at construction) ─
-    current_step: int = field(default=0, init=False)
+    # The label (description string) of the step currently being dispatched —
+    # NOT a number. Step modules pass this straight through to write_status()/
+    # print_step_header()/print_step_result(), which key everything off labels.
+    current_label: str = field(default="", init=False)
 
     def __post_init__(self) -> None:
         cfg = self.raw_config
@@ -121,6 +156,7 @@ class PipelineContext:
         self.hf_parallel = cfg.get("hf_parallel", False)
         self.vasp_srun_per_dir = mode_cfg.get("srun_per_dir", "")
         self.vasp_sbatch_per_dir = mode_cfg.get("sbatch_per_dir", "")
+        self.vasp_gpus_per_dir = mode_cfg.get("gpus_per_dir", 4)
         self.salloc_relax = mode_cfg.get("salloc") or mode_cfg.get("salloc_relax", "")
         self.salloc_per_dir = mode_cfg.get("salloc") or mode_cfg.get("salloc_per_dir", "")
         self.start_from_supercell = cfg.get("start_from_supercell", False)
@@ -132,28 +168,3 @@ class PipelineContext:
     def config(self) -> dict:
         """Raw merged config dict — for utility functions that accept the full config."""
         return self.raw_config
-
-
-def build_context(write_status, config, material_dir, material_name,
-                  work_dir, srun_args, vasp_binary, hffiles_dir, raman_dir,
-                  script_dir, binary_utilities_dir, cpu_flag, scratch_flag,
-                  run_relaxation, vasp_loop_fn, inside_salloc=False) -> PipelineContext:
-    """Construct a PipelineContext from pipeline-level values."""
-    return PipelineContext(
-        raw_config=config,
-        material_dir=material_dir,
-        material_name=material_name,
-        work_dir=work_dir,
-        srun_args=srun_args,
-        vasp_binary=vasp_binary,
-        hffiles_dir=hffiles_dir,
-        raman_dir=raman_dir,
-        script_dir=script_dir,
-        binary_utilities_dir=binary_utilities_dir,
-        cpu_flag=cpu_flag,
-        scratch_flag=scratch_flag,
-        run_relaxation=run_relaxation,
-        vasp_loop_fn=vasp_loop_fn,
-        write_status=write_status,
-        inside_salloc=inside_salloc,
-    )

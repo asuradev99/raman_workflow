@@ -1,4 +1,12 @@
-"""Workflow status tracking: step descriptions, resume parsing, status table."""
+"""Workflow status tracking: step labels, resume parsing, status table.
+
+Design note: step *numbers* carry no identity anywhere in this module or in
+the resume logic. The only stable identity is the step **label** (its
+human-readable description string, e.g. "Phonon postprocessing"). Numbers
+shown in the rendered table are purely cosmetic — recomputed on every render
+as 1-based positions within EXPECTED_LABELS — so reordering, inserting, or
+splitting steps never breaks resume matching.
+"""
 
 import os
 import time
@@ -6,34 +14,65 @@ import time
 from .io import calc_duration, fmt_time
 
 
-# STEP_DESCRIPTIONS is populated at pipeline startup from PIPELINE (src/__init__.py)
-# so that the descriptions in the status table always match the Step registry.
-# The dict is initialised empty here; automation_raman_analysis.py calls
-# populate_step_descriptions() before running any steps.
-STEP_DESCRIPTIONS: dict = {}
+# ── Canonical relax-step labels ──────────────────────────────────────────────
+# Shared by src/__init__.py (pipeline registry) and src/scf_relax.py (the step
+# that actually writes status under these labels) so the literal strings
+# can't drift out of sync between the two call sites.
+RELAX_LABEL_SINGLE = "Initial VASP relaxation"
+RELAX_LABEL_DEFECT_1 = "Defect relax 1 (lattice fixed)"
+RELAX_LABEL_DEFECT_2 = "Defect relax 2 (full)"
 
-# Accumulated step history (preserved across write_status calls)
+
+def relax_labels(config: dict, start_from_supercell: bool) -> list:
+    """Label(s) the relax step uses for this material's config.
+
+    Two-stage defect relax (relax 1 + relax 2) if the config requests it and
+    provides both INCAR templates; otherwise the standard single-stage
+    unit-cell relaxation.
+    """
+    templates = config.get("incar_templates", {})
+    has_defect_pair = (
+        start_from_supercell
+        and "defect_relax_fixed" in templates
+        and "defect_relax_full" in templates
+    )
+    if has_defect_pair:
+        return [RELAX_LABEL_DEFECT_1, RELAX_LABEL_DEFECT_2]
+    return [RELAX_LABEL_SINGLE]
+
+
+# EXPECTED_LABELS is the full ordered label sequence for THIS run, set once
+# at startup (see set_expected_labels) from the Step registry + config. It
+# drives both the status-table row list (including not-yet-started rows)
+# and what "everything completed" means for parse_resume_step.
+EXPECTED_LABELS: list = []
+
+# Accumulated step history (preserved across write_status calls), keyed by label.
 STEP_HISTORY: dict = {}
 
-# Total number of steps for display
-TOTAL_STEPS = 8
 
+def set_expected_labels(labels: list) -> None:
+    """Set the ordered list of labels for this run's pipeline.
 
-def populate_step_descriptions(descriptions: dict) -> None:
-    """Inject step descriptions derived from the PIPELINE registry.
-
-    Called once at pipeline startup so the status table uses the same
-    human-readable labels as the Step objects in src/__init__.py.
+    Must be called once at startup, before any write_status()/
+    parse_resume_step() calls.
     """
-    STEP_DESCRIPTIONS.clear()
-    STEP_DESCRIPTIONS.update(descriptions)
+    EXPECTED_LABELS.clear()
+    EXPECTED_LABELS.extend(labels)
+
+
+def _step_number(label: str) -> int:
+    """1-based display position of `label` in EXPECTED_LABELS — cosmetic only."""
+    try:
+        return EXPECTED_LABELS.index(label) + 1
+    except ValueError:
+        return 0
 
 
 # ── Step banners ───────────────────────────────────────────────────────────
-def print_step_header(step_num, description=""):
+def print_step_header(label: str):
     """Print a visually distinct step-start banner to the log."""
-    desc = description or STEP_DESCRIPTIONS.get(step_num, f"Step {step_num}")
-    text = f"  STEP {step_num} — {desc}"
+    text = f"  STEP {_step_number(label)} — {label}"
     text = text[:66].ljust(66)
     bar = "═" * 66
     print(f"\n╔{bar}╗")
@@ -41,9 +80,8 @@ def print_step_header(step_num, description=""):
     print(f"╚{bar}╝\n")
 
 
-def print_step_result(step_num, ok=True, duration_s=0, message=""):
+def print_step_result(label: str, ok=True, duration_s=0, message=""):
     """Print a step-completion or step-failure message to the log."""
-    desc = STEP_DESCRIPTIONS.get(step_num, f"Step {step_num}")
     icon = "✓" if ok else "✗"
     status_word = "COMPLETE" if ok else "FAILED"
     dur_str = ""
@@ -52,82 +90,113 @@ def print_step_result(step_num, ok=True, duration_s=0, message=""):
     elif duration_s > 0:
         dur_str = f" [{calc_duration(0, duration_s)}]"
     msg_suffix = f" — {message}" if message else ""
-    print(f"\n  {icon} STEP {step_num} {status_word} — {desc}{dur_str}{msg_suffix}\n")
+    print(f"\n  {icon} STEP {_step_number(label)} {status_word} — {label}{dur_str}{msg_suffix}\n")
+
+
+def begin_step(ctx, description):
+    """Print step header, mark running in status file, return t_start.
+
+    Replaces the three-line boilerplate at the top of every step's run():
+        print_step_header(step)
+        ctx.write_status(step, "running", description)
+        t_start = time.time()
+    """
+    step = ctx.current_label
+    print_step_header(step)
+    ctx.write_status(step, "running", description)
+    return time.time()
+
+
+def finish_dispatch_step(ctx, ok, t_start, n_dirs, compute_mode, name):
+    """Write final status and raise on failure for a dispatch-based step.
+
+    Replaces the identical 8-line ok/fail/complete block at the end of
+    force_constants.py and resonant_vasp.py.
+    """
+    step = ctx.current_label
+    if not ok:
+        ctx.write_status(step, "failed", f"{name} incomplete ({compute_mode})")
+        print_step_result(step, ok=False, duration_s=time.time() - t_start,
+                          message=f"{compute_mode} failed")
+        raise RuntimeError(f"{step} failed ({compute_mode})")
+    ctx.write_status(step, "completed", f"{name} — {n_dirs} dirs ({compute_mode})")
+    print_step_result(step, ok=True, duration_s=time.time() - t_start,
+                      message=f"{n_dirs} dirs ({compute_mode})")
 
 
 # ── Status table writer ────────────────────────────────────────────────────
-def write_status(step, status, message="", *,
+def write_status(label, status, message="", *,
                  status_file, material_label, material_name, base_project_dir):
-    """Write a combined status-overview + chronological log entry."""
+    """Write a combined status-overview + chronological log entry.
+
+    `label` is the step's human-readable description — the canonical
+    identity for everything (table rows, resume matching). The special
+    label "final" marks overall pipeline completion.
+    """
     now_ts = time.time()
     now_str = fmt_time(now_ts)
-    step_desc = STEP_DESCRIPTIONS.get(step, f"Step {step}")
 
-    if step not in STEP_HISTORY:
-        STEP_HISTORY[step] = {"start_ts": now_ts}
-    elif status == "completed" and STEP_HISTORY[step].get("status") == "running":
-        pass
+    if label not in STEP_HISTORY:
+        STEP_HISTORY[label] = {"start_ts": now_ts}
 
-    STEP_HISTORY[step]["end_ts"] = now_ts
-    STEP_HISTORY[step]["status"] = status
+    STEP_HISTORY[label]["end_ts"] = now_ts
+    STEP_HISTORY[label]["status"] = status
     if message:
-        STEP_HISTORY[step]["message"] = message
+        STEP_HISTORY[label]["message"] = message
 
     any_failed = any(h.get("status") == "failed" for h in STEP_HISTORY.values())
     if status == "failed" or any_failed:
         overall_status = "FAILED"
-    elif status == "completed" and step == "final":
+    elif status == "completed" and label == "final":
         overall_status = "COMPLETED"
     else:
         overall_status = "RUNNING"
 
-    pipeline_start = STEP_HISTORY.get(1, {}).get("start_ts", now_ts)
+    first_label = EXPECTED_LABELS[0] if EXPECTED_LABELS else label
+    pipeline_start = STEP_HISTORY.get(first_label, {}).get("start_ts", now_ts)
 
     def _dur(s, e):
         return calc_duration(s, e) if s and e else ""
 
     def _icon(sts):
-        return {"completed": "\u2713", "running": "\u25B6",
-                "failed": "\u2717"}.get(sts, "\u2014")
+        return {"completed": "✓", "running": "▶",
+                "failed": "✗"}.get(sts, "—")
 
-    running_step = None
+    running_label = None
     for k, h in STEP_HISTORY.items():
         if h.get("status") == "running" and k != "final":
-            running_step = k
+            running_label = k
 
     lines = []
     lines.append("")
-    lines.append("\u2501" * 78)
-    header = f"  RAMAN WORKFLOW  \u2502  {material_name}  \u2502  {now_str}"
+    lines.append("━" * 78)
+    header = f"  RAMAN WORKFLOW  │  {material_name}  │  {now_str}"
     lines.append(header)
-    lines.append("\u2501" * 78)
+    lines.append("━" * 78)
     lines.append("")
 
     elapsed = calc_duration(pipeline_start, now_ts) if pipeline_start else ""
     summary_parts = [f"Status   {overall_status}"]
-    if running_step is not None:
-        r_desc = STEP_DESCRIPTIONS.get(running_step, f"Step {running_step}")
-        summary_parts.append(f"\u2014 Step {running_step} ({r_desc})")
+    if running_label is not None:
+        summary_parts.append(f"— Step {_step_number(running_label)} ({running_label})")
     if overall_status == "FAILED" and message:
-        summary_parts.append(f"\u2014 {message}")
+        summary_parts.append(f"— {message}")
     lines.append(f"  {'  '.join(summary_parts)}")
     lines.append(f"  Started  {fmt_time(pipeline_start)}")
     lines.append(f"  Elapsed  {elapsed}")
     lines.append("")
 
-    table_keys = sorted(k for k in STEP_DESCRIPTIONS if isinstance(k, (int, float)))
     rows = []
-    for s in table_keys:
-        h = STEP_HISTORY.get(s, {})
+    for lbl in EXPECTED_LABELS:
+        h = STEP_HISTORY.get(lbl, {})
         sts = h.get("status", "")
-        desc = STEP_DESCRIPTIONS[s]
         icon = _icon(sts)
         dur = _dur(h.get("start_ts"), h.get("end_ts"))
-        desc_display = desc[:40]
-        rows.append((s, icon, sts.upper() if sts else "\u2014", desc_display, dur))
+        desc_display = lbl[:40]
+        rows.append((_step_number(lbl), icon, sts.upper() if sts else "—", desc_display, dur))
 
     col_widths = [4, 3, 8, 42, 8]
-    sep_line = "\u2500" * (sum(col_widths) + len(col_widths) + 1)
+    sep_line = "─" * (sum(col_widths) + len(col_widths) + 1)
 
     def _fmt_row(cols):
         parts = []
@@ -142,20 +211,20 @@ def write_status(step, status, message="", *,
                 parts.append(f"{c:<{w}}")
             else:
                 parts.append(f"{c:>{w}}")
-        return "\u2502 " + " \u2502 ".join(parts) + " \u2502"
+        return "│ " + " │ ".join(parts) + " │"
 
-    lines.append("  \u250c" + sep_line + "\u2510")
+    lines.append("  ┌" + sep_line + "┐")
     lines.append("  " + _fmt_row(["#", "", "Status", "Description", "Duration"]))
-    lines.append("  \u2502" + sep_line + "\u2502")
+    lines.append("  │" + sep_line + "│")
 
-    for s, icon, sts_text, desc, dur in rows:
-        lines.append("  " + _fmt_row([s, icon, sts_text, desc, dur]))
+    for num, icon, sts_text, desc, dur in rows:
+        lines.append("  " + _fmt_row([num, icon, sts_text, desc, dur]))
 
-    lines.append("  \u2514" + sep_line + "\u2518")
+    lines.append("  └" + sep_line + "┘")
     lines.append("")
-    lines.append("\u2501" * 78)
+    lines.append("━" * 78)
     lines.append("  STEP LOG")
-    lines.append("\u2501" * 78)
+    lines.append("━" * 78)
     lines.append("")
 
     try:
@@ -167,9 +236,9 @@ def write_status(step, status, message="", *,
 
 def make_write_status(status_file, material_label, material_name, base_project_dir):
     """Create a ``write_status`` callable pre-bound to pipeline-specific values."""
-    def _inner(step, status, message=""):
+    def _inner(label, status, message=""):
         write_status(
-            step, status, message,
+            label, status, message,
             status_file=status_file,
             material_label=material_label,
             material_name=material_name,
@@ -179,83 +248,90 @@ def make_write_status(status_file, material_label, material_name, base_project_d
 
 
 # ── Resume parser ──────────────────────────────────────────────────────────
-def parse_resume_step(status_file, step_history, step_descriptions):
-    """Parse the last status table in workflow.log to determine resume step."""
+def parse_resume_step(status_file, step_history, expected_labels):
+    """Parse the last status table in workflow.log to determine the resume label.
+
+    Matching is done purely against the Description column text — the
+    leading step-number column is cosmetic and intentionally ignored, so
+    table re-numbering across code changes never breaks resume. Returns the
+    label to resume at, or None if every label in `expected_labels` is
+    COMPLETED.
+    """
+    if not expected_labels:
+        raise ValueError("parse_resume_step: expected_labels must be non-empty")
+
     if not os.path.exists(status_file):
-        print(f"[resume] No existing status file at {status_file}. Starting from step 1.")
-        return 1
+        print(f"[resume] No existing status file at {status_file}. "
+              f"Starting from \"{expected_labels[0]}\".")
+        return expected_labels[0]
 
     try:
         with open(status_file) as f:
             content = f.read()
 
-        table_starts = [i for i, c in enumerate(content) if c == '\u250c']
+        table_starts = [i for i, c in enumerate(content) if c == '┌']
         if not table_starts:
-            print(f"[resume] No status table found in {status_file}. Starting from step 1.")
-            return 1
+            print(f"[resume] No status table found in {status_file}. "
+                  f"Starting from \"{expected_labels[0]}\".")
+            return expected_labels[0]
 
         last_table_start = table_starts[-1]
-        table_end = content.find('\u2514', last_table_start)
+        table_end = content.find('└', last_table_start)
         if table_end == -1:
             table_end = len(content)
 
         table_section = content[last_table_start:table_end]
 
-        completed_steps = set()
-        running_step = None
-        failed_step = None
+        completed_labels = set()
+        running_label = None
+        failed_label = None
 
         for line in table_section.split('\n'):
             line = line.strip()
-            if not line.startswith('\u2502'):
+            if not line.startswith('│'):
                 continue
-            parts = [p.strip() for p in line.split('\u2502')]
-            if len(parts) < 4:
+            parts = [p.strip() for p in line.split('│')]
+            if len(parts) < 5:
                 continue
-            try:
-                step_str = parts[1].strip()
-                step_num = float(step_str) if '.' in step_str else int(step_str)
-            except (ValueError, IndexError):
-                continue
-
-            status_text = parts[3].strip().upper() if len(parts) > 3 else ""
+            label_text = parts[4].strip()
+            status_text = parts[3].strip().upper()
+            if not label_text or label_text == "Description":
+                continue  # header row
 
             if status_text == "COMPLETED":
-                completed_steps.add(step_num)
-                step_history[step_num] = {
+                completed_labels.add(label_text)
+                step_history[label_text] = {
                     "status": "completed",
                     "start_ts": 0, "end_ts": 0,
                     "message": "Resumed — completed in previous run",
                 }
             elif status_text == "RUNNING":
-                running_step = step_num
+                running_label = label_text
             elif status_text == "FAILED":
-                failed_step = step_num
+                failed_label = label_text
 
-        if running_step is not None:
-            step_history[running_step] = {
+        if running_label is not None:
+            step_history[running_label] = {
                 "status": "running", "start_ts": 0, "end_ts": 0,
                 "message": "Interrupted — was RUNNING",
             }
-            print(f"[resume] Step {running_step} was ACTIVE (likely crashed). "
-                  f"Retrying from step {running_step}.")
-            return running_step
+            print(f"[resume] \"{running_label}\" was ACTIVE (likely crashed). "
+                  f"Retrying from there.")
+            return running_label
 
-        if failed_step is not None:
-            print(f"[resume] Step {failed_step} was FAILED. Retrying from step {failed_step}.")
-            return failed_step
+        if failed_label is not None:
+            print(f"[resume] \"{failed_label}\" had FAILED. Retrying from there.")
+            return failed_label
 
-        all_step_keys = sorted(k for k in step_descriptions if isinstance(k, (int, float)))
-        for s in all_step_keys:
-            if s not in completed_steps:
-                print(f"[resume] Continuing from step {s} "
-                      f"({step_descriptions.get(s, 'Unknown')}).")
-                return s
+        for label in expected_labels:
+            if label not in completed_labels:
+                print(f"[resume] Continuing from \"{label}\".")
+                return label
 
         print("[resume] All steps already completed. Nothing to do.")
         return None
 
     except Exception as e:
         print(f"[resume] Warning: Could not parse {status_file}: {e}")
-        print("[resume] Starting from step 1 (full pipeline).")
-        return 1
+        print(f"[resume] Starting from \"{expected_labels[0]}\" (full pipeline).")
+        return expected_labels[0]

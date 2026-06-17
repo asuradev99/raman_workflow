@@ -1,12 +1,12 @@
 """Step 8 — Post-processing (kopia, RAMFILE, energy loop, SpectroPy, output)."""
 import os, time, glob, shutil
-from util.io import run_command
+from util.io import run_command, require_file
 from util.postproc import generate_kopia_script, inject_ramfile_energies
-from util.status import print_step_header, print_step_result
+from util.status import begin_step, print_step_result
 
 def run(ctx):
     write_status = ctx.write_status
-    step = ctx.current_step
+    step = ctx.current_label
     raman_dir = ctx.raman_dir
     bin_dir = ctx.binary_utilities_dir
     is_cpu = ctx.cpu_flag
@@ -18,9 +18,7 @@ def run(ctx):
     config = ctx.config
     hf_dir = ctx.hffiles_dir
 
-    print_step_header(step)
-    write_status(step, "running", "Post-processing")
-    t_start = time.time()
+    t_start = begin_step(ctx, "Post-processing")
 
     # ── Kopia ─────────────────────────────────────────────────────────
     ra_dirs = sorted(glob.glob(os.path.join(raman_dir, "ra_pos_*")))
@@ -83,8 +81,7 @@ def run(ctx):
 
     # ── Energy loop (raman_tensor + broadening) ───────────────────────
     for binary in ("raman_tensor", "broadening"):
-        if not os.path.exists(os.path.join(bin_dir, binary)):
-            raise FileNotFoundError(f"{binary} not found")
+        require_file(os.path.join(bin_dir, binary), binary)
     for e in energies:
         if not os.path.exists(os.path.join(store_ramfile, f"RAMFILE_{e}")):
             raise RuntimeError(f"RAMFILE_{e} not found")

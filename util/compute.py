@@ -1,26 +1,20 @@
-"""Compute provisioning — salloc pipe + sbatch launcher + polling."""
+"""VASP step dispatch — serial, parallel-batch, and sbatch_parallel/sbatch modes.
+
+Knows about VASP directories and compute_mode-based dispatch strategies, but
+does not talk to Slurm directly — all raw Slurm calls go through util/slurm.py.
+Resource allocation (salloc/sbatch wrapper) lives in the top-level provision.py.
+"""
 
 import os
-import shlex
+import re
 import subprocess
-import tempfile
-import time
+
+from .slurm import build_bash_setup, run_via_salloc_pipe, submit_many, submit_sbatch_wrapper
+from .vasp import is_calculation_complete
+from .status import parse_resume_step, STEP_HISTORY
 
 
-# ── Shared bash-setup helpers ─────────────────────────────────────────────────
-
-def build_bash_setup(system_paths: dict) -> str:
-    """Return a bash snippet that activates the conda env and loads modules."""
-    sp = system_paths
-    lines = ["source ~/.bashrc 2>/dev/null || true"]
-    if sp.get("conda_init"):
-        lines.append(f"source {sp['conda_init']} 2>/dev/null")
-    if sp.get("conda_env"):
-        lines.append(f"conda activate {sp['conda_env']} 2>/dev/null")
-    if sp.get("vasp_modules"):
-        lines.append(f"module load {sp['vasp_modules']} 2>/dev/null")
-    return "\n".join(lines)
-
+# ── Serial VASP wrapper (bash template) ──────────────────────────────────────
 
 def build_serial_vasp_wrapper(system_paths: dict) -> str:
     """Return a bash wrapper *template* for serial VASP runs inside an salloc.
@@ -44,207 +38,7 @@ done""",
     return "\n".join(lines)
 
 
-def run_pipeline_in_salloc(ctx, full_pipeline=True):
-    """Wrap a pipeline re-invocation inside an auto-allocated salloc.
-
-    If *full_pipeline*, passes ``--inside-salloc`` (all steps run in salloc).
-    Otherwise passes ``--salloc-steps`` (only steps 1-3 in salloc, login node
-    continues with steps 4+).
-    """
-    sp = ctx.system_paths
-    material_dir = ctx.material_dir
-    work_dir = ctx.work_dir
-    salloc_args = ctx.salloc_relax
-    if not salloc_args:
-        raise KeyError("salloc_relax not set in compute_modes config")
-
-    salloc_flag = "--inside-salloc" if full_pipeline else "--salloc-steps"
-    flags = [salloc_flag]
-    if ctx.scratch_flag:
-        flags.append("--scratch")
-    if ctx.cpu_flag:
-        flags.append("--cpu")
-
-    raman_workflow_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    python_bin = os.path.join(sp.get("conda_env", ""), "bin", "python3")
-    if not os.path.isfile(python_bin):
-        python_bin = "python3"
-    wrapper = "\n".join([
-        "#!/bin/bash -l",
-        build_bash_setup(sp),
-        f"export PYTHONPATH={raman_workflow_dir}:$PYTHONPATH",
-        f"cd {material_dir}",
-        f"export RAMAN_PROJECT_DIR={os.environ.get('RAMAN_PROJECT_DIR', '')}",
-        f"{python_bin} -m src.automation_raman_analysis {' '.join(flags)}",
-    ])
-    run_via_salloc_pipe(
-        wrapper,
-        salloc_args=salloc_args,
-        job_name=f"raman_{ctx.material_name}",
-        work_dir=work_dir,
-    )
-
-
-def run_via_salloc_pipe(wrapper_script, job_name="raman_pipe",
-                        salloc_args="", work_dir=""):
-    """Write *wrapper_script* to work_dir, pipe into salloc, block until done."""
-    if not salloc_args:
-        raise ValueError("salloc_args is required")
-    if not work_dir:
-        raise ValueError("work_dir is required (must be on shared filesystem)")
-
-    import uuid
-    script_path = os.path.join(work_dir, f".salloc_wrapper_{uuid.uuid4().hex[:8]}.sh")
-    with open(script_path, "w") as f:
-        f.write(wrapper_script)
-
-    cmd = (f"echo 'bash {script_path}' | "
-           f"salloc {salloc_args} "
-           f"-J {job_name}")
-    print(f"  [compute] Waiting for allocation ({salloc_args})…")
-    try:
-        subprocess.run(cmd, shell=True, check=True)
-    finally:
-        if os.path.exists(script_path):
-            os.unlink(script_path)
-    print(f"  [compute] Allocation released.")
-
-
-def _sbatch_exports(system_paths, extra=None):
-    """Build an --export= string from system_paths config for sbatch."""
-    exports = ["ALL"]
-    if extra:
-        exports.extend(f"{k}={v}" for k, v in extra.items())
-    if system_paths:
-        sp = system_paths
-        if sp.get("vasp_modules"):
-            exports.append(f"VASP_MODULES={sp['vasp_modules']}")
-        if sp.get("conda_init"):
-            exports.append(f"CONDA_INIT={sp['conda_init']}")
-        if sp.get("conda_env"):
-            exports.append(f"CONDA_ENV={sp['conda_env']}")
-    return ",".join(exports)
-
-
-def _submit_one_job(script_path, job_name, exports_str, sbatch_args_list, output_dir=None):
-    """Run sbatch for one job. Returns job ID string, or None on failure."""
-    cmd = ["sbatch", f"--job-name={job_name}", f"--export={exports_str}"]
-    if output_dir:
-        cmd += [f"--output={output_dir}/slurm_%j.out",
-                f"--error={output_dir}/slurm_%j.err"]
-    cmd += sbatch_args_list
-    cmd.append(script_path)
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if result.returncode != 0:
-        print(f"  [compute] ERROR submitting {job_name}: {result.stderr.strip()}")
-        return None
-    return result.stdout.strip().split()[-1]
-
-
-def submit_many(script_path, directories, job_name_prefix="vasp",
-                qos="preempt", system_paths=None,
-                srun_args="", sbatch_args=""):
-    """Submit one sbatch job per directory, poll until all finish.
-
-    srun_args  — passed as $SRUN_ARGS env var inside the job (from srun_per_dir config).
-    sbatch_args — sbatch resource flags (nodes, gpus, time, qos, constraint)
-                  sourced from sbatch_per_dir config; overrides any #SBATCH headers.
-    """
-    n_total = len(directories)
-    if n_total == 0:
-        return True
-
-    sbatch_args_list = shlex.split(sbatch_args) if sbatch_args else []
-    base_extra = {"SRUN_ARGS": srun_args}  # always export — batch scripts use set -u
-
-    job_ids = []
-    for i, d in enumerate(directories):
-        job_name = f"{job_name_prefix}_{i:03d}"
-        exports_str = _sbatch_exports(system_paths or {}, extra={**base_extra, "DIR": d})
-        jid = _submit_one_job(script_path, job_name, exports_str, sbatch_args_list, output_dir=d)
-        if jid:
-            job_ids.append(jid)
-            print(f"  [compute] Submitted {job_name} ({i+1}/{n_total}): job {jid} → {d}")
-
-    if not job_ids:
-        print("  [compute] No jobs submitted successfully.")
-        return False
-
-    print(f"  [compute] Waiting for {len(job_ids)} job(s) to complete…")
-    return _poll_jobs(job_ids)
-
-
-def _poll_jobs(job_ids, sleep_s=15):
-    """Poll a list of Slurm job IDs until all are done. Returns True if all OK."""
-    remaining = set(job_ids)
-    while remaining:
-        time.sleep(sleep_s)
-        finished = _check_done(remaining)
-        remaining -= finished
-        if finished:
-            print(f"  [compute] {len(finished)} job(s) finished, "
-                  f"{len(remaining)} remaining")
-    return True
-
-
-def _check_done(job_ids):
-    """Return the subset of *job_ids* that have completed (no longer in squeue)."""
-    try:
-        result = subprocess.run(["squeue", "-h", "-o", "%A", "-j",
-                                 ",".join(job_ids)],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                universal_newlines=True)
-        still_running = set(result.stdout.strip().split())
-    except Exception:
-        return set()
-    return set(job_ids) - still_running
-
-
-def submit_sbatch_wrapper(wrapper_script, job_name="vasp_pipe",
-                          nodes=1, walltime="48:00:00",
-                          qos="preempt", account="m526",
-                          ntasks_per_node=4, cpus_per_task=32,
-                          extra_exports=None, output_dir=None,
-                          sbatch_args=""):
-    """Write *wrapper_script* to a temp file, submit via sbatch, poll until done.
-
-    sbatch_args — resource flags as a single string (e.g. from a sbatch_relax config
-                  key).  When provided, overrides the individual nodes/walltime/qos/
-                  account params.  When omitted, those params are used to build the
-                  resource args.
-
-    Returns True if the job completed successfully.
-    """
-    if sbatch_args:
-        sbatch_args_list = shlex.split(sbatch_args)
-    else:
-        sbatch_args_list = [
-            f"--nodes={nodes}",
-            f"--ntasks-per-node={ntasks_per_node}",
-            f"--cpus-per-task={cpus_per_task}",
-            f"--time={walltime}",
-            f"--qos={qos}",
-            f"--account={account}",
-            "--constraint=gpu",
-            "--gpus-per-node=4",
-        ]
-
-    exports_str = _sbatch_exports({}, extra=extra_exports or {})
-
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
-        f.write(wrapper_script)
-        script_path = f.name
-
-    try:
-        jid = _submit_one_job(script_path, job_name, exports_str, sbatch_args_list, output_dir)
-        if jid is None:
-            return False
-        print(f"  [compute] Submitted {job_name} (job {jid}), waiting…")
-        return _poll_jobs([jid])
-    finally:
-        if os.path.exists(script_path):
-            os.unlink(script_path)
-
+# ── Serial in salloc with retry ───────────────────────────────────────────────
 
 def run_serial_in_salloc_with_retry(directories, wrapper_template,
                                     vasp_binary, work_dir,
@@ -277,7 +71,7 @@ def run_serial_in_salloc_with_retry(directories, wrapper_template,
 
         # Update remaining
         remaining = [d for d in remaining
-                     if not _is_calc_done(d)]
+                     if not is_calculation_complete(d)]
         retry += 1
 
         if remaining and retry < max_retries:
@@ -295,13 +89,174 @@ def run_serial_in_salloc_with_retry(directories, wrapper_template,
     return True
 
 
-def _is_calc_done(dirpath):
-    """Check if a VASP calculation completed (OUTCAR + General timing)."""
-    outcar = os.path.join(dirpath, "OUTCAR")
-    if not os.path.exists(outcar):
+# ── Parallel batches within an existing allocation ────────────────────────────
+
+def run_dirs_in_parallel_batches(directories, vasp_binary, srun_args,
+                                 gpus_per_dir=4, total_gpus=None,
+                                 log_name="relaxation.stdout"):
+    """Run VASP in *directories* concurrently within an existing allocation.
+
+    Used by ``sbatch_mix`` mode (one big sbatch allocation, no per-directory
+    sub-jobs). Launches up to ``total_gpus // gpus_per_dir`` directories at
+    once as background ``srun`` job steps — each claiming its own disjoint
+    ``gpus_per_dir``-GPU (1 node, by default) slice of the allocation, no
+    ``--overlap`` needed since Slurm won't double-book nodes between
+    concurrent steps in the same job. Waits for each batch to finish before
+    starting the next, so if there aren't enough GPUs to run everything at
+    once, this naturally degrades to serial batches of N-GPUs-worth at a
+    time until all directories are done.
+
+    Already-complete directories (per ``util.vasp.is_calculation_complete``)
+    are skipped up front. Returns True if every directory ends up complete.
+    """
+    # ── Guard against srun_args/gpus_per_dir drift ─────────────────────────
+    # The concurrency math below assumes every directory's srun call claims
+    # exactly `gpus_per_dir` GPUs on exactly 1 node. If a config edit changes
+    # one without the other, the batch sizing would be wrong — e.g. launching
+    # more concurrent 1-node steps than the allocation has nodes, which just
+    # queues silently inside the job and burns the whole walltime. Fail fast
+    # instead, before any srun is launched.
+    gpn_match = re.search(r'--gpus-per-node[=\s]+(\d+)', srun_args)
+    if gpn_match and int(gpn_match.group(1)) != gpus_per_dir:
+        raise ValueError(
+            f"run_dirs_in_parallel_batches: srun_args requests "
+            f"--gpus-per-node={gpn_match.group(1)} but gpus_per_dir="
+            f"{gpus_per_dir} — these must match or the batching math below "
+            f"is wrong. Fix the compute_modes.sbatch_mix config."
+        )
+    nodes_match = re.search(r'--nodes[=\s]+(\d+)', srun_args)
+    if nodes_match and int(nodes_match.group(1)) != 1:
+        raise ValueError(
+            f"run_dirs_in_parallel_batches: srun_args requests "
+            f"--nodes={nodes_match.group(1)}, expected --nodes=1 (exactly "
+            f"one node per directory) — concurrency math assumes this. "
+            f"Fix the compute_modes.sbatch_mix config."
+        )
+
+    todo = [d for d in directories if not is_calculation_complete(d)]
+    if not todo:
+        return True
+
+    if total_gpus is None:
+        nnodes = int(os.environ.get("SLURM_NNODES")
+                     or os.environ.get("SLURM_JOB_NUM_NODES") or 1)
+        total_gpus = nnodes * 4
+
+    concurrency = max(1, total_gpus // gpus_per_dir)
+    n_batches = (len(todo) + concurrency - 1) // concurrency
+    print(f"  [sbatch_mix] {len(todo)} dir(s) to run, {concurrency} concurrent "
+          f"({gpus_per_dir} GPUs/dir, {total_gpus} GPUs total) — "
+          f"{n_batches} batch(es)")
+
+    for batch_num, start in enumerate(range(0, len(todo), concurrency), start=1):
+        batch = todo[start:start + concurrency]
+        print(f"  [sbatch_mix] Batch {batch_num}/{n_batches}: "
+              f"{len(batch)} dir(s) concurrently…")
+        procs = []
+        for d in batch:
+            dirname = os.path.basename(d)
+            cmd = f"srun {srun_args} {vasp_binary} > {log_name} 2>&1"
+            procs.append((dirname, subprocess.Popen(cmd, shell=True, cwd=d)))
+        for dirname, proc in procs:
+            rc = proc.wait()
+            if rc != 0:
+                print(f"  [sbatch_mix] WARNING: srun in {dirname} exited {rc}")
+
+    remaining = [d for d in todo if not is_calculation_complete(d)]
+    if remaining:
+        print(f"  [sbatch_mix] {len(remaining)} dir(s) still incomplete after batching.")
         return False
-    try:
-        with open(outcar) as f:
-            return "General timing and accounting" in f.read()
-    except Exception:
-        return False
+    print(f"  [sbatch_mix] All {len(todo)} dir(s) complete.")
+    return True
+
+
+# ── 5-way compute_mode dispatch ───────────────────────────────────────────────
+
+def dispatch_vasp_runs(ctx, all_dirs, todo, *, job_prefix, dir_script_name,
+                       all_script_name, env_dir_key, env_dir_value,
+                       all_job_name, manual_runner, mix_log_name="relaxation.stdout"):
+    """Shared 5-way compute_mode dispatch for force_constants.py / resonant_vasp.py.
+
+    sbatch_parallel/sbatch, sbatch_serial (outside salloc), interactive_serial
+    (outside salloc), and sbatch_mix behave identically for both callers —
+    only script/job/env names and the directory list differ, passed in via
+    the keyword args above.
+
+    interactive_manual, and sbatch_serial/interactive_serial when *already*
+    inside an salloc (no need to re-allocate), all run the same way as each
+    other — but that "same way" differs per caller (force_constants runs one
+    combined retry-loop script over all hf dirs; resonant_vasp runs one srun
+    per directory), so it's supplied by the caller as ``manual_runner(todo)
+    -> bool``.
+
+    Returns True/False (ok).
+    """
+    compute_mode = ctx.compute_mode
+    scripts_root = os.path.join(os.path.dirname(ctx.script_dir), "scripts")
+
+    if compute_mode in ("sbatch_parallel", "sbatch"):
+        script_path = os.path.join(scripts_root, dir_script_name)
+        max_retries = getattr(ctx, "vasp_max_restarts", 3)
+        ok = False
+        for attempt in range(1, max_retries + 1):
+            incomplete = [d for d in all_dirs if not is_calculation_complete(d)]
+            if not incomplete:
+                ok = True
+                break
+            print(f"  [sbatch_parallel] Attempt {attempt}/{max_retries}: "
+                  f"submitting {len(incomplete)}/{len(all_dirs)} dirs…")
+            submit_many(script_path, incomplete, job_name_prefix=job_prefix,
+                        system_paths=ctx.system_paths,
+                        srun_args=ctx.vasp_srun_per_dir,
+                        sbatch_args=ctx.vasp_sbatch_per_dir)
+            # submit_many only confirms jobs left squeue — re-check actual VASP completion above
+        return ok
+
+    if compute_mode == "sbatch_serial" and not ctx.inside_salloc:
+        print(f"  [sbatch_serial] Submitting 1 job for {len(todo)} dirs…")
+        script_path = os.path.join(scripts_root, all_script_name)
+        with open(script_path) as f:
+            script_content = f.read()
+        exports = {env_dir_key: env_dir_value, "VASP_BINARY": ctx.vasp_binary}
+        return submit_sbatch_wrapper(script_content, job_name=all_job_name,
+                                     extra_exports=exports, output_dir=env_dir_value)
+
+    if compute_mode == "interactive_serial" and not ctx.inside_salloc:
+        print(f"  [interactive_serial] {len(todo)} dirs, auto-salloc + retry…")
+        return run_serial_in_salloc_with_retry(
+            todo, build_serial_vasp_wrapper(ctx.system_paths),
+            vasp_binary=ctx.vasp_binary, work_dir=ctx.work_dir,
+            srun_args=ctx.srun_args, salloc_args=ctx.salloc_per_dir,
+        )
+
+    if compute_mode == "sbatch_mix":
+        if not ctx.inside_salloc:
+            raise RuntimeError(
+                "sbatch_mix reached dispatch without ctx.inside_salloc=True — "
+                "this step should only run inside the single big sbatch "
+                "allocation submitted by automation_raman_analysis.py."
+            )
+        total_gpus = (int(os.environ.get("SLURM_NNODES")
+                          or os.environ.get("SLURM_JOB_NUM_NODES")
+                          or 1) * 4)
+        max_retries = getattr(ctx, "vasp_max_restarts", 3)
+        ok = False
+        for attempt in range(1, max_retries + 1):
+            incomplete = [d for d in all_dirs if not is_calculation_complete(d)]
+            if not incomplete:
+                ok = True
+                break
+            print(f"  [sbatch_mix] Attempt {attempt}/{max_retries}: "
+                  f"{len(incomplete)}/{len(all_dirs)} dirs remaining…")
+            run_dirs_in_parallel_batches(
+                incomplete, ctx.vasp_binary, ctx.vasp_srun_per_dir,
+                gpus_per_dir=ctx.vasp_gpus_per_dir, total_gpus=total_gpus,
+                log_name=mix_log_name,
+            )
+            # re-checked via is_calculation_complete at the top of the next iteration
+        return ok
+
+    # interactive_manual (default), or sbatch_serial/interactive_serial already
+    # inside an existing salloc — same execution path as interactive_manual,
+    # just dispatched there from a different top-level mode.
+    return manual_runner(todo)

@@ -1,4 +1,4 @@
-"""VASP-related utilities: convergence checks, HDF5 helpers, force analysis."""
+"""VASP output checks: completion, convergence, force analysis, dielectric."""
 
 import os
 import re
@@ -7,8 +7,9 @@ import numpy as np
 
 from .io import run_command
 
-# ── Optional py4vasp-core import ──────────────────────────────────────────
+# ── Optional py4vasp-core import (h5py only ever used alongside it below) ──
 try:
+    import h5py
     import py4vasp as _py4vasp
     from py4vasp.exception import FileAccessError as _Py4vaspFileAccessError
     _PY4VASP = True
@@ -45,20 +46,35 @@ def is_vasprun_valid(filepath):
 
 
 def is_calculation_complete(dirpath):
-    """Return True if a VASP run in *dirpath* completed at least one ionic step.
+    """Return True if the VASP run in *dirpath* finished cleanly.
 
-    Checks ``vaspout.h5`` via py4vasp-core when available; falls back to the
-    ``</modeling>`` tag check on ``vasprun.xml`` for directories without HDF5
-    output.
+    Primary check: ``"General timing and accounting"`` in the tail of OUTCAR.
+    This string is the very last thing VASP writes before exiting — if it is
+    present, the run finished without crashing and all output files (vasprun.xml,
+    vaspout.h5) are guaranteed to be complete and flushed.  No secondary check
+    on HDF5 or XML is needed or safe to add: if py4vasp raises or vasprun.xml
+    is absent, a secondary check would return False for a genuinely complete run.
+
+    Fallback: if OUTCAR is absent (e.g. the directory was set up but VASP never
+    started), fall back to the ``</modeling>`` tag in vasprun.xml so that
+    pre-existing runs without an OUTCAR are still recognised.
+
+    Note: completion ≠ convergence.  A NSW=0 run that hit NELM without SCF
+    convergence still writes "General timing" and passes here.  SCF convergence
+    is checked separately by :func:`check_vasp_convergence`.
     """
-    if _PY4VASP and _h5_path(dirpath):
+    outcar_path = os.path.join(dirpath, "OUTCAR")
+    if os.path.isfile(outcar_path):
         try:
-            calc = _py4vasp.Calculation.from_path(dirpath)
-            return calc.run_info.read()["num_ionic_steps"] > 0
-        except _Py4vaspFileAccessError:
-            pass
-        except Exception:
-            pass
+            size = os.path.getsize(outcar_path)
+            with open(outcar_path, "rb") as f:
+                if size > 4096:
+                    f.seek(-4096, 2)
+                tail = f.read().decode("utf-8", errors="ignore")
+            return "General timing and accounting" in tail
+        except (IOError, OSError):
+            return False
+    # No OUTCAR — fall back to vasprun.xml for legacy/unstarted dirs
     return is_vasprun_valid(os.path.join(dirpath, "vasprun.xml"))
 
 
@@ -172,6 +188,41 @@ def _print_force_table(prefix, forces, mags, labels, max_idx, max_f):
         print("\n".join(lines))
 
 
+def _has_zbrent_error(stdout_path):
+    """Return True if relaxation.stdout contains a ZBRENT fatal error."""
+    if not os.path.exists(stdout_path):
+        return False
+    try:
+        with open(stdout_path) as f:
+            return "ZBRENT: fatal error in bracketing" in f.read()
+    except OSError:
+        return False
+
+
+def _extract_max_force(outcar_path):
+    """Return max force magnitude (eV/Å) from the last ionic step in OUTCAR, or None."""
+    if not os.path.exists(outcar_path):
+        return None
+    try:
+        with open(outcar_path) as f:
+            content = f.read()
+        blocks = re.findall(
+            r"TOTAL-FORCE \(eV/Angst\)\n\s*-+\n(.*?)\n\s*-+",
+            content, re.DOTALL
+        )
+        if not blocks:
+            return None
+        lines = [l.split() for l in blocks[-1].strip().split("\n") if len(l.split()) >= 6]
+        if not lines:
+            return None
+        return max(
+            (float(p[3])**2 + float(p[4])**2 + float(p[5])**2)**0.5
+            for p in lines
+        )
+    except Exception:
+        return None
+
+
 def check_vasp_convergence(outcar_dir, stage_label=""):
     """Check that VASP completed and converged in *outcar_dir*.
 
@@ -182,8 +233,6 @@ def check_vasp_convergence(outcar_dir, stage_label=""):
     Fallback: greps OUTCAR for the ``"General timing and accounting"`` footer
     and the ionic/electronic convergence strings.
     """
-    import h5py
-
     prefix = f"  [vasp:{stage_label}]" if stage_label else "  [vasp]"
 
     # ── Primary: py4vasp-core + HDF5 ─────────────────────────────────────────
@@ -198,21 +247,54 @@ def check_vasp_convergence(outcar_dir, stage_label=""):
                     f"VASP crashed before writing any output."
                 )
 
+            # All HDF5 reads — including _build_atom_labels(hf, ...) — must
+            # happen inside this block. hf is closed the moment the `with`
+            # exits, and h5py silently degrades rather than erroring on a
+            # closed handle (_build_atom_labels catches everything and falls
+            # back to generic atom_N labels), so a handle used outside this
+            # block doesn't crash — it just quietly loses real atom labels.
             with h5py.File(_h5_path(outcar_dir), "r") as hf:
                 nsw    = int(hf["input/incar/NSW"][()])
                 ediffg = float(hf["input/incar/EDIFFG"][()])
 
-            if nsw == 0:
-                print(f"{prefix} VASP static run complete ({n_steps} step)")
-                return
+                if nsw == 0:
+                    # Static run — check SCF convergence via OUTCAR.
+                    # Force convergence (EDIFFG) is not meaningful for NSW=0;
+                    # the right criterion is electronic: VASP writes
+                    # "aborting loop because EDIFF is reached" when the SCF
+                    # converges within NELM iterations.  Absence of that string
+                    # (with "General timing" confirmed) means NELM was exhausted
+                    # without convergence → forces in vasprun.xml are unreliable.
+                    _outcar = os.path.join(outcar_dir, "OUTCAR")
+                    if os.path.exists(_outcar):
+                        _sz = os.path.getsize(_outcar)
+                        with open(_outcar, "rb") as _fh:
+                            if _sz > 131072:
+                                _fh.seek(-131072, 2)
+                            _tail = _fh.read().decode("utf-8", errors="ignore")
+                        if "aborting loop because EDIFF is reached" in _tail:
+                            print(f"{prefix} VASP static SCF converged "
+                                  f"({n_steps} ionic step, EDIFF reached)")
+                            return
+                        raise RuntimeError(
+                            f"{prefix} VASP static run finished but SCF did NOT "
+                            f"converge (no 'aborting loop because EDIFF is reached' "
+                            f"in OUTCAR — NELM likely reached without convergence). "
+                            f"Increase NELM in the hf INCAR template, delete this "
+                            f"directory's OUTCAR to trigger a rerun, and retry."
+                        )
+                    # OUTCAR absent — fall through to force check as best effort
+                    print(f"{prefix} VASP static run complete ({n_steps} step) "
+                          f"— OUTCAR missing, skipping SCF convergence check")
+                    return
 
-            f_last = calc.force[-1].read()["forces"]
-            f_mags = np.linalg.norm(f_last, axis=1)
-            max_f  = float(np.max(f_mags))
-            max_idx = int(np.argmax(f_mags))
-            tol    = abs(ediffg)
+                f_last = calc.force[-1].read()["forces"]
+                f_mags = np.linalg.norm(f_last, axis=1)
+                max_f  = float(np.max(f_mags))
+                max_idx = int(np.argmax(f_mags))
+                tol    = abs(ediffg)
 
-            atom_labels = _build_atom_labels(hf, n_atoms=len(f_mags))
+                atom_labels = _build_atom_labels(hf, n_atoms=len(f_mags))
 
             converged = max_f <= tol
             status = "converged" if converged else "NOT converged"
@@ -258,7 +340,29 @@ def check_vasp_convergence(outcar_dir, stage_label=""):
             f"{prefix} VASP did not complete normally "
             f"(no 'General timing and accounting' footer in OUTCAR)."
         )
-    if "reached required accuracy" in content:
+    # Read NSW from INCAR so static and relaxation runs use the right criterion
+    _nsw_fb = None
+    _incar_fb = os.path.join(outcar_dir, "INCAR")
+    if os.path.exists(_incar_fb):
+        with open(_incar_fb) as _f:
+            for _ln in _f:
+                _m = re.match(r"^\s*NSW\s*=\s*(\d+)", _ln, re.IGNORECASE)
+                if _m:
+                    _nsw_fb = int(_m.group(1))
+                    break
+
+    if _nsw_fb == 0:
+        # Static run: "aborting loop because EDIFF is reached" IS the success signal
+        if "aborting loop because EDIFF is reached" in content:
+            print(f"{prefix} VASP static SCF converged (EDIFF reached)")
+        else:
+            print(f"{prefix} WARNING: VASP static SCF did NOT converge "
+                  f"(no 'aborting loop because EDIFF is reached' in OUTCAR).")
+            raise RuntimeError(
+                f"{prefix} VASP static SCF did not converge — NELM likely reached "
+                f"without convergence. Increase NELM in the hf INCAR template."
+            )
+    elif "reached required accuracy" in content:
         print(f"{prefix} VASP converged successfully (ionic)")
     elif "aborting loop because EDIFF is reached" in content:
         print(f"{prefix} WARNING: electronic convergence only — "
@@ -275,47 +379,10 @@ def check_vasp_convergence(outcar_dir, stage_label=""):
         )
 
 
-def _has_zbrent_error(stdout_path):
-    """Return True if relaxation.stdout contains a ZBRENT fatal error."""
-    if not os.path.exists(stdout_path):
-        return False
-    try:
-        with open(stdout_path) as f:
-            return "ZBRENT: fatal error in bracketing" in f.read()
-    except OSError:
-        return False
-
-
-def _extract_max_force(outcar_path):
-    """Return max force magnitude (eV/Å) from the last ionic step in OUTCAR, or None."""
-    if not os.path.exists(outcar_path):
-        return None
-    try:
-        with open(outcar_path) as f:
-            content = f.read()
-        blocks = re.findall(
-            r"TOTAL-FORCE \(eV/Angst\)\n\s*-+\n(.*?)\n\s*-+",
-            content, re.DOTALL
-        )
-        if not blocks:
-            return None
-        lines = [l.split() for l in blocks[-1].strip().split("\n") if len(l.split()) >= 6]
-        if not lines:
-            return None
-        return max(
-            (float(p[3])**2 + float(p[4])**2 + float(p[5])**2)**0.5
-            for p in lines
-        )
-    except Exception:
-        return None
-
-
 def check_dielectric_complete(dirpath, stage_label=""):
     """Verify that a LOPTICS run wrote non-zero dielectric tensor data."""
     if not _PY4VASP or not _h5_path(dirpath):
         return
-
-    import h5py
 
     prefix = f"  [vasp:{stage_label}]" if stage_label else "  [vasp]"
     try:
@@ -341,3 +408,4 @@ def check_dielectric_complete(dirpath, stage_label=""):
         pass
     except Exception as e:
         print(f"{prefix} WARNING: could not verify dielectric data ({e})")
+    return False

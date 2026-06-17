@@ -1,4 +1,7 @@
-"""INCAR generation from YAML config — with tag-level override merging."""
+"""VASP input file generation: INCAR (from YAML config) and KPOINTS."""
+
+import os
+import shutil
 
 
 def _parse_incar(text):
@@ -32,8 +35,10 @@ def build_incar_content(config, stage):
       3. Prepend the override block, then append the (stripped) template.
 
     This guarantees that overridden tags (e.g., ``IBRION``, ``KPAR``) appear
-    **first** in the INCAR — VASP uses the first occurrence for most tags —
-    and the duplicate is removed entirely so there is no ambiguity.
+    **first** in the INCAR. (VASP actually uses the *last* occurrence of a
+    repeated tag, not the first — but it doesn't matter here: the duplicate
+    is removed entirely from the template, so only one occurrence of each
+    tag ever appears in the final INCAR, and there's no ambiguity either way.)
 
     Parameters
     ----------
@@ -84,3 +89,24 @@ def write_incar(path, config, stage):
     content = build_incar_content(config, stage)
     with open(path, "w") as f:
         f.write(content)
+
+
+def write_kpoints(path, comment, mesh, shift):
+    """Write a Gamma-centred KPOINTS file."""
+    with open(path, "w") as f:
+        f.write(f"{comment}\n0\nGamma\n{mesh}\n{shift}\n")
+
+
+def write_vasp_inputs(directory, work_dir, config, stage, mesh, shift, comment="K-points"):
+    """Write INCAR and KPOINTS, and copy POTCAR into *directory*.
+
+    Combines the three-line triad that every setup step repeats before
+    running VASP::
+
+        write_incar(os.path.join(d, "INCAR"), config, stage)
+        write_kpoints(os.path.join(d, "KPOINTS"), comment, mesh, shift)
+        shutil.copy(os.path.join(work_dir, "input", "POTCAR"), d)
+    """
+    write_incar(os.path.join(directory, "INCAR"), config, stage)
+    write_kpoints(os.path.join(directory, "KPOINTS"), comment, mesh, shift)
+    shutil.copy(os.path.join(work_dir, "input", "POTCAR"), directory)

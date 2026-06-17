@@ -4,79 +4,24 @@ Re-exports from submodules for backward compatibility with
 ``from util import ...`` imports.
 """
 
-from .io import Tee, run_command, fmt_time, calc_duration, make_pipeline_excepthook, print_job_header
+from .io import (Tee, run_command, fmt_time, calc_duration,
+                 make_pipeline_excepthook, print_job_header,
+                 do_restart_cleanup, require_path, require_file)
 from .vasp import (
     check_vasp_convergence, check_dielectric_complete, count_ionic_steps,
     is_calculation_complete, is_vasprun_valid, check_no_selective_dynamics,
-    _has_zbrent_error, _extract_max_force,
 )
-from .incar import build_incar_content, write_incar
-from .kpoints import write_kpoints
+from .relax import run_relaxation
+from .incar import build_incar_content, write_incar, write_kpoints, write_vasp_inputs
 from .config import load_config, merge_config, get_srun_args, split_srun_args, validate_config
-from .symlinks import update_wavecar_symlinks, update_chgcar_symlinks
+from .symlinks import update_hf_symlinks, update_raman_symlinks
 from .status import (
-    STEP_DESCRIPTIONS, STEP_HISTORY, TOTAL_STEPS,
+    STEP_HISTORY, EXPECTED_LABELS,
     write_status, make_write_status, parse_resume_step,
-    print_step_header, print_step_result,
-    populate_step_descriptions,
+    print_step_header, print_step_result, begin_step, finish_dispatch_step,
+    set_expected_labels, relax_labels,
+    RELAX_LABEL_SINGLE, RELAX_LABEL_DEFECT_1, RELAX_LABEL_DEFECT_2,
 )
 from .phonopy import ensure_dim_in_conf, write_eigenvectors_conf
 from .postproc import generate_kopia_script, inject_ramfile_energies
-from .vasp_loop import run_hf_loop
-
-# ZBRENT retry — kept here since it's used by the main pipeline
-import os as _os
-import shutil as _shutil
-from .io import run_command as _rc
-from .vasp import check_vasp_convergence, _has_zbrent_error, _extract_max_force
-
-
-def run_relaxation_with_zbrent_retry(scf_dir, srun_args, vasp_binary, stage_label="", max_attempts=3):
-    """Run VASP relaxation with automatic ZBRENT-crash retry.
-
-    Before each attempt: removes stale OUTCAR so the OUTCAR-fallback convergence
-    check does not read a previous run's data.  On a ZBRENT error where forces are
-    already small (max |F| < 0.01 eV/Å), copies CONTCAR → POSCAR so the next
-    attempt resumes from the near-converged geometry instead of starting over.
-    """
-    stdout_path = _os.path.join(scf_dir, "relaxation.stdout")
-    outcar_path = _os.path.join(scf_dir, "OUTCAR")
-    contcar_path = _os.path.join(scf_dir, "CONTCAR")
-    poscar_path = _os.path.join(scf_dir, "POSCAR")
-
-    for attempt in range(1, max_attempts + 1):
-        # Remove stale OUTCAR so convergence check reads this run only
-        if _os.path.exists(outcar_path):
-            _os.remove(outcar_path)
-
-        print(f"\n  [relax] Attempt {attempt}/{max_attempts}...")
-        _rc(
-            f"srun {srun_args} {vasp_binary} > relaxation.stdout",
-            cwd=scf_dir,
-            check_success=False,
-        )
-        try:
-            check_vasp_convergence(scf_dir, stage_label)
-            print(f"  [relax] Relaxation succeeded on attempt {attempt}.")
-            return True
-        except RuntimeError as e:
-            print(f"  [relax] Attempt {attempt} failed: {e}")
-            if attempt < max_attempts:
-                if _has_zbrent_error(stdout_path):
-                    max_f = _extract_max_force(outcar_path)
-                    if max_f is not None and max_f < 0.01:
-                        _shutil.copy(contcar_path, poscar_path)
-                        print(f"  [zbrent] Forces converged (max |F| = {max_f:.6f} eV/Å). "
-                              f"Copied CONTCAR → POSCAR for retry.")
-                    else:
-                        f_str = f"{max_f:.6f} eV/Å" if max_f is not None else "unavailable (no OUTCAR)"
-                        print(f"  [zbrent] ZBRENT error detected "
-                              f"(max |F| = {f_str} — not yet converged).")
-                else:
-                    # Not ZBRENT — e.g., NSW exhausted without convergence
-                    if _os.path.exists(contcar_path) and _os.path.exists(poscar_path):
-                        _shutil.copy(contcar_path, poscar_path)
-                        print(f"  [relax] Copied CONTCAR → POSCAR to continue from best structure.")
-                continue
-    print(f"  [relax] Max attempts ({max_attempts}) reached.")
-    return False
+from .vasp_loop import list_hf_dirs, run_vasp_in_dirs

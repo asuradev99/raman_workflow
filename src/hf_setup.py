@@ -1,24 +1,20 @@
 """Step 3 — hf/ directory setup (copy, verify, runHF, symlinks)."""
-import os, shutil, time
-from util.io import run_command
-from util.incar import write_incar
-from util.kpoints import write_kpoints
+import os, time
+from util.io import run_command, require_file
+from util.incar import write_vasp_inputs
 from util.phonopy import ensure_dim_in_conf
 from util.symlinks import update_hf_symlinks
-from util.status import print_step_header, print_step_result
+from util.status import begin_step, print_step_result
 
 
 def run(ctx):
     write_status = ctx.write_status
-    step = ctx.current_step
+    step = ctx.current_label
     hf_dir = ctx.hffiles_dir
     work_dir = ctx.work_dir
     bin_dir = ctx.binary_utilities_dir
 
-    print_step_header(step)
-    write_status(step, "running", "hf/ directory setup")
-    t_start = time.time()
-
+    t_start = begin_step(ctx, "hf/ directory setup")
     run_command(f"mkdir -p {hf_dir}", cwd=work_dir)
 
     # ── Caching guard: skip if hf_POSCAR-* dirs already exist ─────────────
@@ -33,30 +29,21 @@ def run(ctx):
                           message=f"{len(existing_hf_dirs)} hf dirs exist (cached)")
         return
 
-    # Copy POSCAR, INCAR, KPOINTS, POTCAR to hf/
+    # Copy POSCAR_unitcell; write INCAR, KPOINTS, POTCAR; symmetry.conf
     run_command(f"cp scf/CONTCAR {hf_dir}/POSCAR_unitcell", cwd=work_dir)
-    write_incar(os.path.join(hf_dir, "INCAR"), ctx.config, "hf")
-    write_kpoints(os.path.join(hf_dir, "KPOINTS"), "K-points for force-constant",
-                  ctx.hf_kpoints_mesh, ctx.hf_kpoints_shift)
-    run_command(f"cp input/POTCAR {hf_dir}/", cwd=work_dir)
+    write_vasp_inputs(hf_dir, work_dir, ctx.config, "hf",
+                      ctx.hf_kpoints_mesh, ctx.hf_kpoints_shift,
+                      "K-points for force-constant")
     ensure_dim_in_conf(os.path.join(hf_dir, "symmetry.conf"), "symmetry.conf", ctx.phonopy_dim)
 
-    # Verify SPOSCAR exists
-    spos_path = os.path.join(hf_dir, "SPOSCAR")
-    if not os.path.exists(spos_path):
-        raise FileNotFoundError(f"SPOSCAR not found in {hf_dir}")
-
-    # runHF folder organization
-    runhf_path = os.path.join(bin_dir, "runHF")
-    if not os.path.exists(runhf_path):
-        raise FileNotFoundError(f"runHF not found at {runhf_path}")
-    run_command(runhf_path, cwd=hf_dir)
+    require_file(os.path.join(hf_dir, "SPOSCAR"), "SPOSCAR")
+    require_file(os.path.join(bin_dir, "runHF"), "runHF")
+    run_command(os.path.join(bin_dir, "runHF"), cwd=hf_dir)
 
     # WAVECAR + CHGCAR symlinks in displacement dirs
     gs_dir = os.path.join(hf_dir, "groundstate")
     if ctx.start_from_supercell:
         # groundstate/ geometry reference only — VASP doesn't run here.
-        # POSCAR is already set by supercell.py (cp SPOSCAR groundstate/POSCAR).
         # Add CHGCAR/WAVECAR symlinks so groundstate/ is valid if ever run manually.
         if not os.path.isdir(gs_dir):
             run_command(f"mkdir -p {gs_dir}", cwd=work_dir)

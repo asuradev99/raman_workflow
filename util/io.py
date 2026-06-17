@@ -1,6 +1,7 @@
 """I/O utilities: Tee, run_command, time formatting, exception hook."""
 
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -116,6 +117,45 @@ def print_job_header(material_label, material_name, work_dir, status_file,
     )
     print(f"{_sep}")
     print(f"{_sep}\n")
+
+
+def do_restart_cleanup(material_dir, work_dir, scratch_flag):
+    """Delete all generated directories + logs from a material dir, preserving input/."""
+    for dirname in ("scf", "hf", "raman", "output"):
+        dp = os.path.join(work_dir, dirname)
+        if os.path.exists(dp) and not os.path.islink(dp):
+            shutil.rmtree(dp)
+            print(f"  [restart] Removed: {dp}/")
+    if scratch_flag:
+        home_output = os.path.join(material_dir, "output")
+        if os.path.exists(home_output) and not os.path.islink(home_output):
+            shutil.rmtree(home_output)
+            print(f"  [restart] Removed HOME output/: {home_output}")
+    for log_name in ("workflow.log", "workflow.out", "salloc_output.log"):
+        for base in (material_dir, work_dir):
+            log_path = os.path.join(base, log_name)
+            if os.path.exists(log_path):
+                os.remove(log_path)
+                print(f"  [restart] Removed: {log_path}")
+    print("  [restart] Done — input/ (including workflow_settings.yaml) preserved.")
+    print("  [restart] Starting fresh pipeline from the beginning...")
+
+
+def require_path(path, what, check=os.path.isfile, hint=""):
+    """Fail fast (sys.exit) if *path* is empty or fails *check*. Use at startup only."""
+    if not path:
+        print(f"Error: {what} not configured.{(' ' + hint) if hint else ''}")
+        sys.exit(1)
+    if not check(path):
+        print(f"Error: {what} not found at '{path}'")
+        sys.exit(1)
+
+
+def require_file(path, label=None):
+    """Raise FileNotFoundError if *path* does not exist. Use mid-step."""
+    if not os.path.exists(path):
+        name = label or os.path.basename(path)
+        raise FileNotFoundError(f"{name} not found at {path}")
 
 
 def make_pipeline_excepthook(status_file):

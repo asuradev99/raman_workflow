@@ -35,7 +35,7 @@ for d in ra_pos_*; do
         continue
     fi
     echo "--- $d ---"
-    cd "$d" && srun --gpus=1 --ntasks=1 "$VASP" > relaxation.stdout && cd ..
+    cd "$d" && srun ${SRUN_ARGS:---gpus=1 --ntasks=1} "$VASP" > relaxation.stdout && cd ..
 done
 
 echo "=== sbatch_all_raman: DONE ==="

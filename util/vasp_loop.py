@@ -1,6 +1,9 @@
-"""VASP force-constant loop — runs hf_POSCAR-* directories with retry.
+"""VASP directory runners — serial, parallel, and retry loop.
 
-Extracted from automation_raman_analysis.py.  Pure function — no globals.
+Public API:
+  run_vasp_in_dirs  — run srun in a list of dirs with retry (used by both
+                      force_constants.py and resonant_vasp.py)
+  list_hf_dirs      — discover hf_POSCAR-* directories
 """
 
 import os
@@ -33,120 +36,76 @@ def list_hf_dirs(hffiles_dir, include_groundstate=False):
     return dirs
 
 
-def run_hf_loop(hffiles_dir, vasp_script_path, max_restarts,
-                srun_args, vasp_binary,
-                cpu_flag=False, hf_parallel=False):
-    """Run VASP in all hf_POSCAR-* dirs, retrying incomplete ones.
+def run_vasp_in_dirs(dirs, srun_args, vasp_binary, *,
+                     max_restarts=3, hf_parallel=False, cpu_flag=False,
+                     log_name="relaxation.stdout"):
+    """Run VASP in *dirs* (absolute paths) with retry and optional parallel execution.
 
-    On retry, only re-runs directories that haven't completed.
-    Returns True if all directories succeeded, False otherwise.
+    Re-checks ``is_calculation_complete`` at the start of each attempt and only
+    re-runs incomplete dirs. Both serial and parallel runners use soft-fail
+    internally — the caller's convergence-check loop validates VASP output.
+    Returns True when all dirs are complete after all attempts.
+
+    Args:
+        dirs:          Absolute paths to the VASP calculation directories.
+        srun_args:     srun argument string (e.g. ``"--gpus-per-node=4 --nodes=1"``).
+        vasp_binary:   Path to the VASP binary.
+        max_restarts:  Maximum number of retry attempts.
+        hf_parallel:   Run all dirs concurrently with split srun args.
+        cpu_flag:      Serial CPU mode (overrides hf_parallel).
+        log_name:      Filename for VASP stdout within each dir.
     """
-    for i in range(max_restarts):
-        print(f"\n--- Running VASP iteration {i+1}/{max_restarts} ---")
-
-        all_hf_abs = list_hf_dirs(hffiles_dir)
-        all_hf = [os.path.basename(d) for d in all_hf_abs]
-
-        if not all_hf:
-            print("  No hf_POSCAR-* dirs found. Running orchestration script...")
-            run_command(vasp_script_path, cwd=hffiles_dir)
-            all_hf_abs = list_hf_dirs(hffiles_dir)
-            all_hf = [os.path.basename(d) for d in all_hf_abs]
-            if not all_hf:
-                print("  ERROR: orchestration script created no hf_POSCAR-* directories.")
-                return False
-
-        # ── Check completion on every iteration (including the first) ────
-        incomplete = [d for d in all_hf
-                      if not is_calculation_complete(os.path.join(hffiles_dir, d))]
-        if not incomplete:
-            print("  All hf_POSCAR-* directories already complete.")
-            return True
-        if len(incomplete) < len(all_hf):
-            print(f"  Skipping {len(all_hf) - len(incomplete)} completed dirs, "
-                  f"running {len(incomplete)} incomplete: "
-                  f"{', '.join(incomplete[:5])}{'...' if len(incomplete) > 5 else ''}")
-
-        # ── Run VASP in incomplete dirs only ──────────────────────────────
-        if cpu_flag:
-            _run_serial_dirs(incomplete, hffiles_dir, srun_args, vasp_binary)
-        elif hf_parallel:
-            _run_hf_parallel(incomplete, hffiles_dir, srun_args, vasp_binary, vasp_script_path)
+    for attempt in range(1, max_restarts + 1):
+        todo = [d for d in dirs if not is_calculation_complete(d)]
+        if not todo:
+            break
+        if len(todo) < len(dirs):
+            print(f"  [vasp] Attempt {attempt}/{max_restarts}: "
+                  f"{len(todo)}/{len(dirs)} dir(s) remaining...")
         else:
-            # Fresh start (all dirs incomplete on first try): delegate to shell script.
-            # Partial resume: bypass shell script (runs everything) and use direct srun.
-            use_shell = (i == 0 and len(incomplete) == len(all_hf))
-            _run_gpu_serial(incomplete, hffiles_dir, srun_args, vasp_binary,
-                            vasp_script_path, first_iteration=use_shell)
-
-        # ── Validate ─────────────────────────────────────────────────────
-        hf_dirs = [os.path.basename(d) for d in list_hf_dirs(hffiles_dir)]
-        if not hf_dirs:
-            print("No hf_POSCAR-* folders found.")
-            return False
-
-        failed = [d for d in hf_dirs if not is_calculation_complete(os.path.join(hffiles_dir, d))]
-        if not failed:
-            print(f"VASP runs completed in all {len(hf_dirs)} displacement directories.")
-            return True
+            print(f"  [vasp] Attempt {attempt}/{max_restarts}: "
+                  f"{len(todo)} dir(s)...")
+        if hf_parallel and not cpu_flag:
+            _run_hf_parallel(todo, srun_args, vasp_binary, log_name=log_name)
         else:
-            print(f"VASP failed or incomplete in {len(failed)}/{len(hf_dirs)} "
-                  f"directories: "
-                  f"{', '.join(failed[:5])}{'...' if len(failed) > 5 else ''}")
-            if i + 1 < max_restarts:
-                print(f"Retrying ({i+2}/{max_restarts})...")
-
-    print(f"--- VASP loop failed after {max_restarts} attempts. ---")
-    return False
+            _run_serial(todo, srun_args, vasp_binary, log_name=log_name)
+    return all(is_calculation_complete(d) for d in dirs)
 
 
-# ── Internal runners ────────────────────────────────────────────────────────
+# ── Internal runners (accept absolute paths) ────────────────────────────────
 
-def _run_serial_dirs(dirs, hffiles_dir, srun_args, vasp_binary):
-    """Run VASP serially in each named directory (names relative to hffiles_dir)."""
-    print(f"  Running VASP serially in {len(dirs)} directories...")
-    for d in dirs:
-        print(f"    Running VASP in {d}...")
-        run_command(f"srun {srun_args} {vasp_binary} > stdout",
-                    cwd=os.path.join(hffiles_dir, d))
-
-
-def _run_gpu_serial(dirs, hffiles_dir, srun_args, vasp_binary,
-                    vasp_script_path, first_iteration=True):
-    print(f"  [gpu] Running VASP in {len(dirs)} directories (serial)...")
-    if first_iteration:
+def _run_serial(dirs, srun_args, vasp_binary, log_name="relaxation.stdout"):
+    """Run VASP sequentially in each directory (absolute paths, soft-fail)."""
+    print(f"  Running VASP serially in {len(dirs)} director{'y' if len(dirs) == 1 else 'ies'}...")
+    for dirpath in dirs:
+        print(f"    Running VASP in {os.path.basename(dirpath)}...")
         run_command(
-            f"export SRUN_ARGS='{srun_args}' && bash {vasp_script_path}",
-            cwd=hffiles_dir,
+            f"srun {srun_args} {vasp_binary} > {log_name}",
+            cwd=dirpath,
+            check_success=False,
         )
-    else:
-        _run_serial_dirs(dirs, hffiles_dir, srun_args, vasp_binary)
 
 
-def _run_hf_parallel(dirs, hffiles_dir, srun_args, vasp_binary, vasp_script_path):
-    print(f"  [gpu:hf_parallel] Running {len(dirs)} directories in parallel...")
+def _run_hf_parallel(dirs, srun_args, vasp_binary, log_name="relaxation.stdout"):
+    """Run VASP concurrently across dirs using split srun args and --overlap."""
+    print(f"  [hf_parallel] Running {len(dirs)} dir(s) in parallel...")
     split_args = split_srun_args(srun_args, len(dirs))
     if not split_args:
-        print("  [gpu:hf_parallel] split_srun_args failed — falling back to serial")
-        run_command(
-            f"export SRUN_ARGS='{srun_args}' && bash {vasp_script_path}",
-            cwd=hffiles_dir,
-        )
+        print("  [hf_parallel] split_srun_args failed — falling back to serial")
+        _run_serial(dirs, srun_args, vasp_binary, log_name=log_name)
         return
     procs = []
-    for d, sargs in zip(dirs, split_args):
-        dpath = os.path.join(hffiles_dir, d)
-        cmd = f"srun --overlap {sargs} {vasp_binary} > stdout"
-        print(f"    [{d}] srun --overlap {sargs} {vasp_binary}")
-        procs.append(subprocess.Popen(cmd, shell=True, cwd=dpath))
+    for dirpath, sargs in zip(dirs, split_args):
+        cmd = f"srun --overlap {sargs} {vasp_binary} > {log_name}"
+        print(f"    [{os.path.basename(dirpath)}] {cmd}")
+        procs.append(subprocess.Popen(cmd, shell=True, cwd=dirpath))
     failed = []
-    for d, p in zip(dirs, procs):
-        rc = p.wait()
+    for dirpath, proc in zip(dirs, procs):
+        rc = proc.wait()
         if rc != 0:
-            failed.append(d)
-            print(f"    [{d}] ERROR: VASP exited with code {rc}")
+            failed.append(os.path.basename(dirpath))
+            print(f"    [{os.path.basename(dirpath)}] ERROR: VASP exited with code {rc}")
     if failed:
-        print(f"  [gpu:hf_parallel] {len(failed)}/{len(dirs)} "
-              f"directories FAILED: {', '.join(failed)}")
+        print(f"  [hf_parallel] {len(failed)}/{len(dirs)} FAILED: {', '.join(failed)}")
     else:
-        print(f"  [gpu:hf_parallel] All {len(dirs)} directories completed.")
+        print(f"  [hf_parallel] All {len(dirs)} dir(s) completed.")

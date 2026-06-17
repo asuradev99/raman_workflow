@@ -71,7 +71,7 @@ while true; do
     echo "=== Pipeline attempt $ATTEMPT ==="
 
     set +e
-    "$PYTHON" -m src.automation_raman_analysis $SCRATCH_FLAG $RESTART_FLAG
+    "$PYTHON" "$RAMAN_DIR/src/provision.py" $SCRATCH_FLAG $RESTART_FLAG
     EXIT_CODE=$?
     set -e
 
