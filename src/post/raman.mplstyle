@@ -1,0 +1,39 @@
+
+# --- Text / Font ---
+text.usetex        : True
+font.family        : serif
+
+# --- Figure ---
+figure.dpi         : 300
+
+# --- Axes ---
+axes.labelsize     : 11
+axes.linewidth     : 0.6
+
+# --- Lines / Markers ---
+lines.linewidth    : 0.6
+lines.markersize   : 1.5
+patch.linewidth    : 0.4
+
+# --- Error bars ---
+errorbar.capsize   : 1
+
+# --- Ticks (x) ---
+xtick.labelsize        : 9
+xtick.direction        : out
+xtick.major.width      : 0.6
+xtick.minor.visible    : True
+xtick.minor.size       : 2
+xtick.minor.width      : 0.4
+
+# --- Ticks (y) ---
+ytick.labelsize        : 9
+ytick.direction        : out
+ytick.major.width      : 0.6
+ytick.minor.visible    : True
+ytick.minor.size       : 2
+ytick.minor.width      : 0.4
+
+# --- Legend ---
+legend.frameon     : False
+legend.fontsize    : 9

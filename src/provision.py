@@ -32,8 +32,8 @@ if _RAMAN_WORKFLOW_DIR not in sys.path:
     sys.path.insert(0, _RAMAN_WORKFLOW_DIR)
 
 from util.config import load_config
-from util.status import parse_resume_step, STEP_HISTORY
-from util.slurm import build_bash_setup, run_via_salloc_pipe, submit_sbatch_wrapper
+from util.slurm import (build_bash_setup, run_via_salloc_pipe, submit_sbatch_wrapper,
+                        SallocAllocationError, SbatchCancelledError)
 
 _PIPELINE_SCRIPT = os.path.join(_SRC_DIR, "automation_raman_analysis.py")
 
@@ -79,6 +79,7 @@ cm_cfg       = CONFIG.get("compute_modes", {}).get(compute_mode, {})
 scratch_base = os.environ.get("SCRATCH", "")
 if SCRATCH_FLAG and scratch_base:
     work_dir = os.path.join(scratch_base, "vasp_calculations", MATERIAL_NAME)
+    os.makedirs(work_dir, exist_ok=True)  # must exist before wrapper script is written
 else:
     work_dir = MATERIAL_DIR
 STATUS_FILE = os.path.join(work_dir, "workflow.log")
@@ -124,14 +125,22 @@ def _run_direct(*pipeline_flags):
 
 
 def _is_complete():
-    """Return True if workflow.log shows every expected step COMPLETED."""
-    # Deferred import: importing src triggers all step modules (phonopy etc).
-    # Safe here — provision.py is a standalone script, not imported by anything.
-    from src import expected_labels as get_expected_labels
-    start_from_supercell = CONFIG.get("start_from_supercell", False)
-    expected = get_expected_labels(CONFIG, start_from_supercell)
-    next_label = parse_resume_step(STATUS_FILE, STEP_HISTORY, expected)
-    return next_label is None
+    """Return True if every pipeline step's output files are present."""
+    from src import PIPELINE, STEP_REGISTRY
+    step_filter = CONFIG.get("pipeline_steps", None)
+    if step_filter is not None:
+        steps = [STEP_REGISTRY[n] for n in step_filter if n in STEP_REGISTRY]
+    else:
+        steps = PIPELINE
+    for step in steps:
+        if step._is_complete is None:
+            return False
+        try:
+            if not step._is_complete(work_dir, CONFIG):
+                return False
+        except Exception:
+            return False
+    return True
 
 
 # ── Mode dispatch ─────────────────────────────────────────────────────────────
@@ -155,8 +164,11 @@ elif compute_mode == "interactive_serial":
             job_name=f"raman_{MATERIAL_NAME}",
             work_dir=work_dir,
         )
+    except SallocAllocationError as e:
+        print(f"[provision] Allocation rejected by Slurm: {e}")
+        sys.exit(43)
     except subprocess.CalledProcessError:
-        pass  # salloc timeout/preemption — check the log for actual progress
+        pass  # preemption or walltime — check files for actual progress
     sys.exit(0 if _is_complete() else 42)
 
 elif compute_mode in ("sbatch_parallel", "sbatch"):
@@ -196,12 +208,16 @@ elif compute_mode in ("sbatch_serial", "sbatch_mix"):
         print(f"Error: compute_modes.{compute_mode}.sbatch not configured.")
         sys.exit(1)
     print(f"[provision] Submitting sbatch job ({sbatch_args})")
-    ok = submit_sbatch_wrapper(
-        _salloc_wrapper("--inside-salloc"),
-        job_name=f"raman_{MATERIAL_NAME}",
-        output_dir=work_dir,
-        sbatch_args=sbatch_args,
-    )
+    try:
+        ok = submit_sbatch_wrapper(
+            _salloc_wrapper("--inside-salloc"),
+            job_name=f"raman_{MATERIAL_NAME}",
+            output_dir=work_dir,
+            sbatch_args=sbatch_args,
+        )
+    except SbatchCancelledError as e:
+        print(f"[provision] {e}")
+        sys.exit(1)  # fatal — user explicitly cancelled, do not retry
     if not ok:
         print(f"[provision] sbatch submission or execution failed.")
         sys.exit(1)

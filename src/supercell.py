@@ -7,6 +7,7 @@ from util.vasp import (
     check_vasp_convergence,
     check_no_selective_dynamics,
     count_ionic_steps,
+    is_calculation_complete,
 )
 from util.status import begin_step, print_step_result
 
@@ -52,3 +53,8 @@ def run(ctx):
            else "Supercell relaxed — CHGCAR/WAVECAR in hf/groundstate/")
     write_status(step, "completed", msg)
     print_step_result(step, ok=True, duration_s=time.time() - t_start)
+
+
+def is_complete(work_dir, config):
+    p = os.path.join(work_dir, "hf", "groundstate", "CONTCAR")
+    return os.path.exists(p) and os.path.getsize(p) > 0

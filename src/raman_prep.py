@@ -1,5 +1,5 @@
 """Step 6 — Raman directory setup + displacement generation."""
-import os, time
+import os, time, glob
 from util.io import run_command, require_file
 from util.incar import write_vasp_inputs
 from util.symlinks import update_raman_symlinks
@@ -56,3 +56,7 @@ def run(ctx):
 
     write_status(step, "completed", "Raman setup + displacements done")
     print_step_result(step, ok=True, duration_s=time.time() - t_start)
+
+
+def is_complete(work_dir, config):
+    return bool(glob.glob(os.path.join(work_dir, "raman", "ra_pos_*")))

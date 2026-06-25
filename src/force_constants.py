@@ -52,3 +52,8 @@ def run(ctx):
         check_vasp_convergence(dirpath, "step-4")
 
     finish_dispatch_step(ctx, ok, t_start, len(all_dirs), compute_mode, "Force constants")
+
+
+def is_complete(work_dir, config):
+    p = os.path.join(work_dir, "hf", "FORCE_SETS")
+    return os.path.exists(p) and os.path.getsize(p) > 0

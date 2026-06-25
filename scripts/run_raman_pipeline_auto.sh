@@ -20,6 +20,8 @@
 
 set -euo pipefail
 
+trap 'echo "=== Interrupted — stopping retry loop ==="; exit 1' INT TERM
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RAMAN_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MATERIAL_NAME="${1:-$(basename "$PWD")}"
@@ -80,11 +82,20 @@ while true; do
         exit 0
     fi
 
-    # Exit code 42 = salloc timeout or sbatch preemption — retry from resume point
+    # Exit code 42 = preempted/timed out — retry after short wait
+    # Exit code 43 = salloc allocation limit hit — wait longer before retry
     # Any other non-zero exit code = fatal error
     if [ $EXIT_CODE -eq 42 ]; then
-        echo "=== Job incomplete (preempted/timed out) — retrying from resume point (attempt $ATTEMPT) ==="
+        echo "=== Preempted/timed out — retrying in 5m (attempt $ATTEMPT) ==="
         RESTART_FLAG=""
+        sleep 300
+        continue
+    fi
+
+    if [ $EXIT_CODE -eq 43 ]; then
+        echo "=== Allocation limit hit — retrying in 10m (attempt $ATTEMPT) ==="
+        RESTART_FLAG=""
+        sleep 600
         continue
     fi
 

@@ -1,5 +1,5 @@
 """Step 7 — Resonant VASP runs in all ra_pos_* directories (mode-dispatched)."""
-import os, glob
+import os, glob, time
 from util.compute import dispatch_vasp_runs
 from util.vasp import check_vasp_convergence, check_dielectric_complete, check_no_selective_dynamics, is_calculation_complete
 from util.vasp_loop import run_vasp_in_dirs
@@ -45,3 +45,8 @@ def run(ctx):
         check_dielectric_complete(dirpath, "step-7")
 
     finish_dispatch_step(ctx, ok, t_start, len(ra_dirs), compute_mode, "Resonant VASP")
+
+
+def is_complete(work_dir, config):
+    dirs = sorted(glob.glob(os.path.join(work_dir, "raman", "ra_pos_*")))
+    return bool(dirs) and all(is_calculation_complete(d) for d in dirs)

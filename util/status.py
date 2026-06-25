@@ -21,6 +21,7 @@ from .io import calc_duration, fmt_time
 RELAX_LABEL_SINGLE = "Initial VASP relaxation"
 RELAX_LABEL_DEFECT_1 = "Defect relax 1 (lattice fixed)"
 RELAX_LABEL_DEFECT_2 = "Defect relax 2 (full)"
+RELAX_LABEL_DEFECT_2_CPU = "Defect relax 2 (CPU)"
 
 
 def relax_labels(config: dict, start_from_supercell: bool) -> list:

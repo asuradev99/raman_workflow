@@ -8,7 +8,7 @@ from . import (
     scf_relax, supercell, hf_setup, force_constants,
     phonon_post, raman_prep, resonant_vasp, post_process,
 )
-from util.status import relax_labels
+from util.status import relax_labels, RELAX_LABEL_DEFECT_2_CPU
 
 # Step names that must run inside the salloc allocation (sbatch_parallel
 # auto-provision mode) — everything after these runs on the login node via
@@ -29,10 +29,15 @@ class Step:
     callable `(config, start_from_supercell) -> list[str]` for steps whose
     label(s) depend on config — currently only the relax step, which uses
     one label normally or two for the defect two-stage relax.
+
+    `_is_complete` is an optional `(work_dir, config) -> bool` function used
+    for file-based resume: if it returns True the step is skipped without
+    consulting workflow.log. None means "always run".
     """
     name: str           # stable slug used in dispatch log lines + salloc boundary checks
     labels: Any          # list[str] OR Callable[[dict, bool], list[str]]
     _run: Callable[[PipelineContext], None]
+    _is_complete: Any = None   # Callable[[str, dict], bool] | None
 
     def run(self, ctx: PipelineContext) -> None:
         self._run(ctx)
@@ -44,15 +49,38 @@ class Step:
 
 
 PIPELINE: list[Step] = [
-    Step("scf_relax",     relax_labels,                            scf_relax.run),
-    Step("supercell",     ["Supercell generation + relaxation"],   supercell.run),
-    Step("hf_setup",      ["hf/ directory setup"],                 hf_setup.run),
-    Step("force_consts",  ["VASP force constants"],                force_constants.run),
-    Step("phonon_post",   ["Phonon postprocessing"],                phonon_post.run),
-    Step("raman_prep",    ["Raman setup + displacements"],          raman_prep.run),
-    Step("resonant_vasp", ["Resonant VASP (dielectric)"],           resonant_vasp.run),
-    Step("post_process",  ["Post-processing + output"],             post_process.run),
+    Step("scf_relax",     relax_labels,                            scf_relax.run,         scf_relax.is_complete),
+    Step("supercell",     ["Supercell generation + relaxation"],   supercell.run,         supercell.is_complete),
+    Step("hf_setup",      ["hf/ directory setup"],                 hf_setup.run,          hf_setup.is_complete),
+    Step("force_consts",  ["VASP force constants"],                force_constants.run,   force_constants.is_complete),
+    Step("phonon_post",   ["Phonon postprocessing"],               phonon_post.run,       phonon_post.is_complete),
+    Step("raman_prep",    ["Raman setup + displacements"],         raman_prep.run,        raman_prep.is_complete),
+    Step("resonant_vasp", ["Resonant VASP (dielectric)"],          resonant_vasp.run,     resonant_vasp.is_complete),
+    Step("post_process",  ["Post-processing + output"],            post_process.run,      post_process.is_complete),
 ]
+
+
+STEP_REGISTRY: dict = {s.name: s for s in PIPELINE}
+STEP_REGISTRY.update({
+    "defect_relax_1": Step(
+        "defect_relax_1",
+        ["Defect relax 1 (lattice fixed)"],
+        scf_relax.run_defect_1,
+        scf_relax.is_complete_defect_1,
+    ),
+    "defect_relax_2": Step(
+        "defect_relax_2",
+        ["Defect relax 2 (full)"],
+        scf_relax.run_defect_2,
+        scf_relax.is_complete_defect_2,
+    ),
+    "defect_relax_2_cpu": Step(
+        "defect_relax_2_cpu",
+        [RELAX_LABEL_DEFECT_2_CPU],
+        scf_relax.run_defect_2_cpu,
+        scf_relax.is_complete_defect_2,
+    ),
+})
 
 
 def expected_labels(config: dict, start_from_supercell: bool) -> list:
@@ -120,9 +148,16 @@ class PipelineContext:
     salloc_relax: str = field(init=False)
     salloc_per_dir: str = field(init=False)
     start_from_supercell: bool = field(init=False)
+    cpu_relax_srun_args: str = field(init=False)
+    cpu_relax_vasp_binary: str = field(init=False)
+    cpu_relax_setup_cmd: str = field(init=False)
     eigvec_band_path: str = field(init=False)
     eigvec_band_labels: str = field(init=False)
     eigvec_band_points: Any = field(init=False)
+    viz_enabled: bool = field(init=False)
+    viz_scale_factor: float = field(init=False)
+    viz_output_format: str = field(init=False)
+    viz_vesta_template: str = field(init=False)
 
     # ── Mutable dispatch state (set by the dispatch loop, not at construction) ─
     # The label (description string) of the step currently being dispatched —
@@ -160,9 +195,24 @@ class PipelineContext:
         self.salloc_relax = mode_cfg.get("salloc") or mode_cfg.get("salloc_relax", "")
         self.salloc_per_dir = mode_cfg.get("salloc") or mode_cfg.get("salloc_per_dir", "")
         self.start_from_supercell = cfg.get("start_from_supercell", False)
+        _cr = cfg.get("cpu_relax", {})
+        self.cpu_relax_srun_args   = mode_cfg.get("srun_cpu_relax", "")
+        self.cpu_relax_vasp_binary = _cr.get("vasp_binary", "")
+        _parts = []
+        if _cr.get("vasp_modules"):
+            _parts.append(f"module load {_cr['vasp_modules']} 2>/dev/null")
+        _omp = _cr.get("omp_env", {})
+        for k, v in _omp.items():
+            _parts.append(f"export {k}={v}")
+        self.cpu_relax_setup_cmd = " && ".join(_parts) if _parts else ""
         self.eigvec_band_path = cfg["eigenvectors_band"]["path"]
         self.eigvec_band_labels = cfg["eigenvectors_band"]["labels"]
         self.eigvec_band_points = cfg["eigenvectors_band"]["points"]
+        _viz = cfg.get("visualization", {})
+        self.viz_enabled        = _viz.get("enabled", False)
+        self.viz_scale_factor   = float(_viz.get("scale_factor", 0.5))
+        self.viz_output_format  = _viz.get("output_format", "vesta").lower()
+        self.viz_vesta_template = _viz.get("vesta_template", "template.vesta")
 
     @property
     def config(self) -> dict:

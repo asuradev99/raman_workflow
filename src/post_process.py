@@ -158,3 +158,8 @@ def run(ctx):
     write_status(step, "completed", "Post-processing done")
     print_step_result(step, ok=True, duration_s=time.time() - t_start)
     write_status("final", "completed", "Automation workflow complete")
+
+
+def is_complete(work_dir, config):
+    raman_data = os.path.join(work_dir, "output", "raman_data")
+    return os.path.isdir(raman_data) and bool(os.listdir(raman_data))

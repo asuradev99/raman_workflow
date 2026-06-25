@@ -12,8 +12,8 @@ import argparse
 import shutil
 from util import (
     Tee, run_command, load_config, validate_config, get_srun_args,
-    parse_resume_step, make_pipeline_excepthook, run_relaxation,
-    print_job_header, make_write_status, STEP_HISTORY,
+    make_pipeline_excepthook, run_relaxation,
+    print_job_header, make_write_status,
     set_expected_labels, do_restart_cleanup, require_path,
 )
 
@@ -177,32 +177,44 @@ print(f"Current working directory: {os.getcwd()}")
 # parse_resume_step() so its "is everything completed?" fallback check has
 # something to compare against.
 from src import (
-    PIPELINE, expected_labels, SALLOC_REQUIRED_STEP_NAMES, PipelineContext,
+    PIPELINE, STEP_REGISTRY, expected_labels, SALLOC_REQUIRED_STEP_NAMES, PipelineContext,
 )
 
 START_FROM_SUPERCELL = CONFIG.get("start_from_supercell", False)
 EXPECTED = expected_labels(CONFIG, START_FROM_SUPERCELL)
+
+_step_filter = CONFIG.get("pipeline_steps", None)
+if _step_filter is not None:
+    _unknown = [n for n in _step_filter if n not in STEP_REGISTRY]
+    if _unknown:
+        print(f"  [pipeline] WARNING: unknown step names in pipeline_steps: {_unknown}")
+    PIPELINE_TO_RUN = [STEP_REGISTRY[n] for n in _step_filter if n in STEP_REGISTRY]
+    EXPECTED = []
+    for _s in PIPELINE_TO_RUN:
+        EXPECTED.extend(_s.resolved_labels(CONFIG, START_FROM_SUPERCELL))
+else:
+    PIPELINE_TO_RUN = PIPELINE
+
 set_expected_labels(EXPECTED)
 
-START_LABEL = parse_resume_step(STATUS_FILE, STEP_HISTORY, EXPECTED)
-if START_LABEL is None:
+
+def _step_is_done(step, work_dir, config):
+    """Return True if the step's output files indicate it already completed."""
+    if step._is_complete is None:
+        return False
+    try:
+        return step._is_complete(work_dir, config)
+    except Exception as e:
+        print(f"  [warn] is_complete check failed for {step.name}: {e} — will run step")
+        return False
+
+
+# ── All steps already done? → exit 0 ─────────────────────────────────────────
+if all(_step_is_done(s, WORK_DIR, CONFIG) for s in PIPELINE_TO_RUN):
+    print(f"[resume] All pipeline steps already complete (verified by output files).")
     sys.exit(0)
 
-print(f"[resume] START_LABEL = \"{START_LABEL}\" — starting pipeline execution.")
-
-# ── Config staleness warning ─────────────────────────────────────────────────
-if START_LABEL != EXPECTED[0] and os.path.exists(STATUS_FILE):
-    log_mtime = os.path.getmtime(STATUS_FILE)
-    for cfg_path, cfg_label in [
-        (SHARED_CONFIG_PATH, "shared"),
-        (CONFIG_PATH, "per-material"),
-    ]:
-        if os.path.exists(cfg_path):
-            if os.path.getmtime(cfg_path) > log_mtime:
-                print(
-                    f"WARNING: {cfg_label} config ({os.path.basename(cfg_path)}) "
-                    f"was modified after the last pipeline run."
-                )
+print(f"[resume] Checking each step for completion via output files...")
 
 # ── --scratch: symlink input/ from HOME → SCRATCH ───────────────────────────
 if SCRATCH_FLAG:
@@ -248,18 +260,22 @@ ctx = PipelineContext(
 )
 
 # ── Step dispatch ─────────────────────────────────────────────────────────────
-# Skip decision is purely label-rank based: a dispatched unit is skipped only
-# if ALL of its labels fall strictly before the resume point. Step numbers
-# are never consulted here — `step.name` (a stable slug) is used only for
-# the --salloc-steps boundary and dispatch log lines.
-resume_idx = EXPECTED.index(START_LABEL)
-for step in PIPELINE:
+# Skip decision is file-based: each step's _is_complete(work_dir, config)
+# inspects actual VASP output files. workflow.log is still written for
+# monitoring but is never consulted for resume decisions.
+for step in PIPELINE_TO_RUN:
     step_labels = step.resolved_labels(CONFIG, START_FROM_SUPERCELL)
-    if max(EXPECTED.index(l) for l in step_labels) < resume_idx:
+
+    if _step_is_done(step, WORK_DIR, CONFIG):
+        print(f"\n  [skip] {step.name}: already complete (output files verified)")
+        for lbl in step_labels:
+            write_status(lbl, "completed", "Already complete (output files verified)")
         continue
+
     if SALLOC_STEPS_FLAG and step.name not in SALLOC_REQUIRED_STEP_NAMES:
         print(f"\n  [salloc-steps] Done with salloc-required steps. Exiting.")
         break
+
     ctx.current_label = step_labels[0]
     print(f"\n  [dispatch] {step.name} — {', '.join(step_labels)}")
     step.run(ctx)

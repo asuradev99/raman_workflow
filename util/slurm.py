@@ -8,8 +8,30 @@ provision.py (resource allocation) and util/compute.py (per-step VASP dispatch).
 import os
 import shlex
 import subprocess
+import sys
 import tempfile
 import time
+
+
+class SallocAllocationError(RuntimeError):
+    """salloc was rejected by Slurm (allocation limit / QOS policy) — not preemption."""
+    pass
+
+
+class SbatchCancelledError(RuntimeError):
+    """sbatch job was manually cancelled by the user (scancel) — do not retry."""
+    pass
+
+
+_ALLOC_REJECTION_KEYWORDS = (
+    "unable to allocate resources",
+    "job violates accounting/qos policy",
+    "qosmaxsubmitjobperuserlimit",
+    "qosgrpsubmitjobslimit",
+    "qosmaxjobsperuserlimit",
+    "batch job submission failed",
+    "insufficient resources",
+)
 
 
 def build_bash_setup(system_paths: dict) -> str:
@@ -43,7 +65,14 @@ def run_via_salloc_pipe(wrapper_script, job_name="raman_pipe",
            f"-J {job_name}")
     print(f"  [compute] Waiting for allocation ({salloc_args})…")
     try:
-        subprocess.run(cmd, shell=True, check=True)
+        result = subprocess.run(cmd, shell=True, stderr=subprocess.PIPE, text=True)
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+        if result.returncode != 0:
+            lower = result.stderr.lower()
+            if any(kw in lower for kw in _ALLOC_REJECTION_KEYWORDS):
+                raise SallocAllocationError(result.stderr.strip())
+            raise subprocess.CalledProcessError(result.returncode, cmd)
     finally:
         if os.path.exists(script_path):
             os.unlink(script_path)
@@ -115,16 +144,44 @@ def submit_many(script_path, directories, job_name_prefix="vasp",
 
 
 def _poll_jobs(job_ids, sleep_s=15):
-    """Poll a list of Slurm job IDs until all are done. Returns True if all OK."""
+    """Poll a list of Slurm job IDs until all are done.
+
+    Raises SbatchCancelledError if any job was manually cancelled (scancel).
+    Returns True otherwise.
+    """
     remaining = set(job_ids)
+    finished_ids = set()
     while remaining:
         time.sleep(sleep_s)
         finished = _check_done(remaining)
         remaining -= finished
+        finished_ids |= finished
         if finished:
             print(f"  [compute] {len(finished)} job(s) finished, "
                   f"{len(remaining)} remaining")
+    _raise_if_cancelled(finished_ids)
     return True
+
+
+def _raise_if_cancelled(job_ids):
+    """Check sacct for any CANCELLED jobs; raise SbatchCancelledError if found."""
+    if not job_ids:
+        return
+    try:
+        result = subprocess.run(
+            ["sacct", "-j", ",".join(job_ids), "-o", "JobID,State", "-n", "-X"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15,
+        )
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and "CANCELLED" in parts[1].upper():
+                raise SbatchCancelledError(
+                    f"Job {parts[0]} was manually cancelled — stopping retry loop."
+                )
+    except SbatchCancelledError:
+        raise
+    except Exception:
+        pass  # sacct unavailable or timed out — treat as non-cancellation
 
 
 def _check_done(job_ids):

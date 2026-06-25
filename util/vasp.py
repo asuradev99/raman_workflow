@@ -66,12 +66,14 @@ def is_calculation_complete(dirpath):
     outcar_path = os.path.join(dirpath, "OUTCAR")
     if os.path.isfile(outcar_path):
         try:
-            size = os.path.getsize(outcar_path)
+            # Read the full OUTCAR — not a tail slice.
+            # VASP 6.4.3 GPU builds append a ~60 KB profiling section AFTER
+            # "General timing and accounting", so tail reads of a few KB silently
+            # miss the marker. These are NSW=0 static files (~200–300 KB each);
+            # reading them in full is negligible.
             with open(outcar_path, "rb") as f:
-                if size > 4096:
-                    f.seek(-4096, 2)
-                tail = f.read().decode("utf-8", errors="ignore")
-            return "General timing and accounting" in tail
+                content = f.read()
+            return b"General timing and accounting" in content
         except (IOError, OSError):
             return False
     # No OUTCAR — fall back to vasprun.xml for legacy/unstarted dirs

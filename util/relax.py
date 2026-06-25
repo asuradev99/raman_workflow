@@ -4,12 +4,13 @@ import os
 import shutil
 import signal
 import subprocess
+import time
 
 from .vasp import check_vasp_convergence, _has_zbrent_error, _extract_max_force
 
 
 def run_relaxation(scf_dir, srun_args, vasp_binary, stage_label="",
-                                     max_attempts=3, stall_poll_s=900):
+                   max_attempts=3, stall_poll_s=900, setup_cmd=""):
     """Run VASP relaxation, self-healing stalls and retrying on ZBRENT crashes.
 
     Each attempt:
@@ -31,7 +32,8 @@ def run_relaxation(scf_dir, srun_args, vasp_binary, stage_label="",
     contcar_path = os.path.join(scf_dir, "CONTCAR")
     poscar_path = os.path.join(scf_dir, "POSCAR")
     watch_path = os.path.join(scf_dir, "OSZICAR")
-    cmd = f"srun {srun_args} {vasp_binary} > relaxation.stdout"
+    _prefix = f"{setup_cmd} && " if setup_cmd else ""
+    cmd = f"{_prefix}srun {srun_args} {vasp_binary} > relaxation.stdout"
 
     def _mtime():
         return os.path.getmtime(watch_path) if os.path.exists(watch_path) else None
@@ -75,6 +77,7 @@ def run_relaxation(scf_dir, srun_args, vasp_binary, stage_label="",
                     print(f"  [watchdog] Copied CONTCAR → POSCAR, relaunching VASP...")
                 else:
                     print(f"  [watchdog] No usable CONTCAR yet — relaunching from existing POSCAR...")
+                time.sleep(300)  # let Slurm clean up the previous step before creating a new one
                 continue  # relaunch srun
 
             print("--- Command completed successfully ---" if proc.returncode == 0

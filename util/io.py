@@ -121,7 +121,7 @@ def print_job_header(material_label, material_name, work_dir, status_file,
 
 def do_restart_cleanup(material_dir, work_dir, scratch_flag):
     """Delete all generated directories + logs from a material dir, preserving input/."""
-    for dirname in ("scf", "hf", "raman", "output"):
+    for dirname in ("scf", "scf2", "hf", "raman", "output"):
         dp = os.path.join(work_dir, dirname)
         if os.path.exists(dp) and not os.path.islink(dp):
             shutil.rmtree(dp)
