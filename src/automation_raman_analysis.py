@@ -10,6 +10,7 @@ if _RAMAN_WORKFLOW_DIR not in sys.path:
 
 import argparse
 import shutil
+import yaml
 from util import (
     Tee, run_command, load_config, validate_config, get_srun_args,
     make_pipeline_excepthook, run_relaxation,
@@ -87,12 +88,19 @@ sys.stdout = Tee(STATUS_FILE, OUTPUT_FILE)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SHARED_CONFIG_PATH = os.path.join(BASE_PROJECT_DIR, "shared_workflow_settings.yaml")
 
+# Read per-material YAML before merging to capture which steps to run (and in
+# what order) — the merged config's steps dict would include shared defaults
+# for all steps, making the run-set ambiguous.
+with open(CONFIG_PATH) as _f:
+    _per_mat_raw = yaml.safe_load(_f) or {}
+_PER_MAT_STEP_NAMES = list(_per_mat_raw.get("steps", {}).keys())
+
 CONFIG = load_config([
     (SHARED_CONFIG_PATH, "shared"),
     (CONFIG_PATH, "per-material"),
 ])
 
-validate_config(CONFIG)
+validate_config(CONFIG, _PER_MAT_STEP_NAMES)
 
 # ── System paths — from YAML config, with env-var override for backward compat ─
 _sp = CONFIG.get("system_paths", {})
@@ -177,23 +185,22 @@ print(f"Current working directory: {os.getcwd()}")
 # parse_resume_step() so its "is everything completed?" fallback check has
 # something to compare against.
 from src import (
-    PIPELINE, STEP_REGISTRY, expected_labels, SALLOC_REQUIRED_STEP_NAMES, PipelineContext,
+    PIPELINE, STEP_REGISTRY, expected_labels, PRE_DISPATCH_STEP_NAMES, PipelineContext,
 )
 
 START_FROM_SUPERCELL = CONFIG.get("start_from_supercell", False)
-EXPECTED = expected_labels(CONFIG, START_FROM_SUPERCELL)
 
-_step_filter = CONFIG.get("pipeline_steps", None)
-if _step_filter is not None:
-    _unknown = [n for n in _step_filter if n not in STEP_REGISTRY]
+if _PER_MAT_STEP_NAMES:
+    _unknown = [n for n in _PER_MAT_STEP_NAMES if n not in STEP_REGISTRY]
     if _unknown:
-        print(f"  [pipeline] WARNING: unknown step names in pipeline_steps: {_unknown}")
-    PIPELINE_TO_RUN = [STEP_REGISTRY[n] for n in _step_filter if n in STEP_REGISTRY]
+        print(f"  [pipeline] WARNING: unknown step names in steps config: {_unknown}")
+    PIPELINE_TO_RUN = [STEP_REGISTRY[n] for n in _PER_MAT_STEP_NAMES if n in STEP_REGISTRY]
     EXPECTED = []
     for _s in PIPELINE_TO_RUN:
         EXPECTED.extend(_s.resolved_labels(CONFIG, START_FROM_SUPERCELL))
 else:
     PIPELINE_TO_RUN = PIPELINE
+    EXPECTED = expected_labels(CONFIG, START_FROM_SUPERCELL)
 
 set_expected_labels(EXPECTED)
 
@@ -272,8 +279,8 @@ for step in PIPELINE_TO_RUN:
             write_status(lbl, "completed", "Already complete (output files verified)")
         continue
 
-    if SALLOC_STEPS_FLAG and step.name not in SALLOC_REQUIRED_STEP_NAMES:
-        print(f"\n  [salloc-steps] Done with salloc-required steps. Exiting.")
+    if SALLOC_STEPS_FLAG and step.name not in PRE_DISPATCH_STEP_NAMES:
+        print(f"\n  [salloc-steps] Pre-dispatch steps complete. Exiting.")
         break
 
     ctx.current_label = step_labels[0]

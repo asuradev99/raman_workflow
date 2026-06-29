@@ -8,16 +8,22 @@ import yaml
 
 
 def merge_config(target_config, file_config, label=""):
-    """Deep-merge a YAML config dict into a target config dict."""
+    """Deep-merge a YAML config dict into a target config dict.
+
+    Dict values are merged recursively so a per-material override like
+    ``steps.scf_relax.kpoints.mesh`` only replaces ``mesh``, not the
+    entire ``kpoints`` block.  Scalar and list values are replaced outright.
+    Keys beginning with ``_`` (metadata) are skipped.
+    """
     if file_config is None:
         return
-    for section, values in file_config.items():
-        if section.startswith("_"):
+    for k, v in file_config.items():
+        if k.startswith("_"):
             continue
-        if isinstance(target_config.get(section), dict) and isinstance(values, dict):
-            target_config[section].update(values)
+        if isinstance(v, dict) and isinstance(target_config.get(k), dict):
+            merge_config(target_config[k], v)
         else:
-            target_config[section] = values
+            target_config[k] = v
 
 
 def load_config(paths):
@@ -41,17 +47,15 @@ def load_config(paths):
 def get_srun_args(config, mode, key="srun_relax", cpu_flag=False):
     """Get srun args from ``compute_modes.<mode>.<key>`` in the config.
 
-    Falls back to ``vasp_srun_cpu.raw`` for CPU, or raises KeyError if
-    the mode/key combination is missing.
+    When ``cpu_flag`` is True, reads ``compute_modes.<mode>.srun_cpu_relax``
+    so args match the node count for the active compute mode.
+    Raises KeyError if the mode/key combination is missing.
     """
-    if cpu_flag:
-        cpu_cfg = config.get("vasp_srun_cpu", {})
-        if isinstance(cpu_cfg, dict) and "raw" in cpu_cfg:
-            return cpu_cfg["raw"]
-        return "--cpu_bind=cores --ntasks 32 --cpus-per-task 4"
-
     modes = config.get("compute_modes", {})
     mode_cfg = modes.get(mode, {})
+    if cpu_flag:
+        args = mode_cfg.get("srun_cpu_relax", "")
+        return args or "--cpu_bind=cores --ntasks 32 --cpus-per-task 4"
     args = mode_cfg.get(key, "")
     if args:
         return args
@@ -61,42 +65,76 @@ def get_srun_args(config, mode, key="srun_relax", cpu_flag=False):
     )
 
 
-# ── Required config keys (checked after loading) ──────────────────────────
-REQUIRED_CONFIG = {
-    "phonopy": ["dim", "amplitude", "band_path", "band_labels", "band_points"],
-    "scf_kpoints": ["mesh", "shift"],
-    "sup_relax_kpoints": ["mesh", "shift"],
-    "hf_kpoints": ["mesh", "shift"],
-    "raman_kpoints": ["mesh", "shift"],
-    "desired_energies": None,          # must exist, any value
-    "raman_tensor": ["incident_polarization", "scattered_polarization", "surface_normal"],
+# ── Step-level required sub-keys (validated per active step) ──────────────
+STEP_REQUIRED_KEYS = {
+    "scf_relax":          ["kpoints", "incar"],
+    "defect_relax_1":     ["kpoints", "incar"],
+    "defect_relax_2":     ["kpoints", "incar"],
+    "defect_relax_2_cpu": ["kpoints", "incar", "cpu_relax"],
+    "supercell":          ["kpoints", "incar"],
+    "hf_setup":           [],            # writes INCAR/KPOINTS from force_consts config
+    "force_consts":       ["kpoints", "incar"],
+    "phonon_post":        ["eigenvectors_band", "visualization"],
+    "raman_prep":         [],            # writes INCAR/KPOINTS from resonant_vasp config
+    "resonant_vasp":      ["kpoints", "incar"],
+    "post_process":       ["broadening", "raman_tensor", "desired_energies"],
+}
+
+# ── Global required sections (always checked, regardless of step selection) ─
+GLOBAL_REQUIRED = {
+    "phonopy": ["dim", "amplitude"],
     "vasp_loop": ["max_restarts"],
-    "eigenvectors_band": ["path", "labels", "points"],
-    "broadening": ["mode", "hwhm", "interpolation", "normalization"],
-    "compute_modes": None,
-    "vasp_srun_cpu": None,
     "system_paths": None,
-    "incar_templates": ["relax", "dielec", "hf", "supercell_relax"],
+    "steps": None,
+}
+
+# ── Required keys per compute mode (only the active mode is validated) ────────
+COMPUTE_MODE_REQUIRED_KEYS = {
+    "interactive_manual": ["srun_relax", "srun_per_dir"],
+    "interactive_serial": ["srun_relax", "salloc"],
+    "sbatch_parallel":    ["srun_relax", "srun_per_dir", "salloc_relax", "sbatch_per_dir"],
+    "sbatch":             ["srun_relax", "srun_per_dir", "salloc_relax", "sbatch_per_dir"],
+    "sbatch_serial":      ["srun_relax", "sbatch"],
+    "sbatch_mix":         ["srun_relax", "srun_per_dir", "sbatch"],
 }
 
 
-def validate_config(config):
-    """Check that all required config keys are present.
+def validate_config(config, step_names):
+    """Check that all required config keys are present for the given steps.
 
-    Prints a clear error for each missing key and exits with code 1
-    if any are absent.  This replaces the old fallback-template approach
-    where missing keys were silently empty.
+    Only validates step-level keys for the steps that are actually being run,
+    and only validates compute_mode keys for the mode this simulation will use.
     """
     missing = []
-    for section, keys in REQUIRED_CONFIG.items():
+    for section, keys in GLOBAL_REQUIRED.items():
         if section not in config:
             missing.append(f"  [{section}] section missing entirely")
             continue
         if keys is None:
-            continue  # just check existence, done above
+            continue
         for key in keys:
             if key not in config[section]:
                 missing.append(f"  [{section}] -> '{key}' missing")
+
+    compute_mode = config.get("compute_mode")
+    if not compute_mode:
+        missing.append("  [compute_mode] top-level key missing")
+    else:
+        mode_cfg = config.get("compute_modes", {}).get(compute_mode, {})
+        if not mode_cfg:
+            missing.append(f"  [compute_modes.{compute_mode}] section missing")
+        else:
+            for key in COMPUTE_MODE_REQUIRED_KEYS.get(compute_mode, []):
+                if key not in mode_cfg:
+                    missing.append(f"  [compute_modes.{compute_mode}] -> '{key}' missing")
+
+    steps_cfg = config.get("steps", {})
+    for name in step_names:
+        required = STEP_REQUIRED_KEYS.get(name, [])
+        step = steps_cfg.get(name, {})
+        for key in required:
+            if key not in step:
+                missing.append(f"  [steps.{name}] -> '{key}' missing")
 
     if missing:
         print("ERROR: Required config key(s) missing:")
@@ -105,7 +143,6 @@ def validate_config(config):
         print()
         print("Make sure both shared_workflow_settings.yaml and")
         print("your per-material input/workflow_settings.yaml define all required keys.")
-        print("See raman_workflow/examples/ for a working template.")
         sys.exit(1)
 
 

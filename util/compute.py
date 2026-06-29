@@ -140,7 +140,7 @@ def run_dirs_in_parallel_batches(directories, vasp_binary, srun_args,
     if total_gpus is None:
         nnodes = int(os.environ.get("SLURM_NNODES")
                      or os.environ.get("SLURM_JOB_NUM_NODES") or 1)
-        total_gpus = nnodes * 4
+        total_gpus = nnodes * gpus_per_dir
 
     concurrency = max(1, total_gpus // gpus_per_dir)
     n_batches = (len(todo) + concurrency - 1) // concurrency
@@ -236,9 +236,10 @@ def dispatch_vasp_runs(ctx, all_dirs, todo, *, job_prefix, dir_script_name,
                 "this step should only run inside the single big sbatch "
                 "allocation submitted by automation_raman_analysis.py."
             )
-        total_gpus = (int(os.environ.get("SLURM_NNODES")
-                          or os.environ.get("SLURM_JOB_NUM_NODES")
-                          or 1) * 4)
+        nnodes = int(os.environ.get("SLURM_NNODES")
+                     or os.environ.get("SLURM_JOB_NUM_NODES")
+                     or 1)
+        total_gpus = nnodes * ctx.vasp_gpus_per_dir
         max_retries = getattr(ctx, "vasp_max_restarts", 3)
         ok = False
         for attempt in range(1, max_retries + 1):

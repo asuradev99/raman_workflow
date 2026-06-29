@@ -41,7 +41,7 @@ def run(ctx):
 
     # Copy POSCAR_unitcell; write INCAR, KPOINTS, POTCAR; symmetry.conf
     run_command(f"cp {relax_subdir}/CONTCAR {hf_dir}/POSCAR_unitcell", cwd=work_dir)
-    write_vasp_inputs(hf_dir, work_dir, ctx.config, "hf",
+    write_vasp_inputs(hf_dir, work_dir, ctx.config, "force_consts",
                       ctx.hf_kpoints_mesh, ctx.hf_kpoints_shift,
                       "K-points for force-constant")
     ensure_dim_in_conf(os.path.join(hf_dir, "symmetry.conf"), "symmetry.conf", ctx.phonopy_dim)

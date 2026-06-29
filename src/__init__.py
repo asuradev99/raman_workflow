@@ -10,10 +10,14 @@ from . import (
 )
 from util.status import relax_labels, RELAX_LABEL_DEFECT_2_CPU
 
-# Step names that must run inside the salloc allocation (sbatch_parallel
-# auto-provision mode) — everything after these runs on the login node via
-# sbatch. Identified by `name` (a stable slug), never by step number.
-SALLOC_REQUIRED_STEP_NAMES = frozenset({"scf_relax", "supercell", "hf_setup"})
+# Steps that must complete before per-directory parallel dispatch begins.
+# In sbatch_parallel these run inside a salloc; in sbatch_mix they run in
+# a dedicated Phase 1 sbatch job.  Everything after these is dispatched as
+# concurrent per-dir srun/sbatch calls.
+PRE_DISPATCH_STEP_NAMES = frozenset({
+    "scf_relax", "supercell", "hf_setup",
+    "defect_relax_1", "defect_relax_2", "defect_relax_2_cpu",
+})
 
 
 @dataclass(frozen=True)
@@ -127,15 +131,16 @@ class PipelineContext:
     compute_mode: str = field(init=False)
     phonopy_dim: str = field(init=False)
     phonopy_amplitude: Any = field(init=False)
-    phonopy_band_points: Any = field(init=False)
     scf_kpoints_mesh: str = field(init=False)
     scf_kpoints_shift: str = field(init=False)
     sup_relax_kpoints_mesh: str = field(init=False)
     sup_relax_kpoints_shift: str = field(init=False)
-    hf_kpoints_mesh: str = field(init=False)
+    hf_kpoints_mesh: str = field(init=False)    # owned by force_consts step
     hf_kpoints_shift: str = field(init=False)
-    raman_kpoints_mesh: str = field(init=False)
+    raman_kpoints_mesh: str = field(init=False) # owned by resonant_vasp step
     raman_kpoints_shift: str = field(init=False)
+    defect_kpoints_mesh: str = field(init=False)  # shared by defect_relax_1/2 steps
+    defect_kpoints_shift: str = field(init=False)
     desired_energies: list = field(init=False)
     raman_incident_pol: str = field(init=False)
     raman_scattered_pol: str = field(init=False)
@@ -158,6 +163,10 @@ class PipelineContext:
     viz_scale_factor: float = field(init=False)
     viz_output_format: str = field(init=False)
     viz_vesta_template: str = field(init=False)
+    broadening_mode: int = field(init=False)
+    broadening_hwhm: Any = field(init=False)
+    broadening_interpolation: int = field(init=False)
+    broadening_normalization: int = field(init=False)
 
     # ── Mutable dispatch state (set by the dispatch loop, not at construction) ─
     # The label (description string) of the step currently being dispatched —
@@ -170,32 +179,42 @@ class PipelineContext:
         c_mode = cfg.get("compute_mode", "interactive_manual")
         mode_cfg = cfg.get("compute_modes", {}).get(c_mode, {})
 
+        def _step_kp(step, key, default=""):
+            return cfg.get("steps", {}).get(step, {}).get("kpoints", {}).get(key, default)
+
         self.compute_mode = c_mode
         self.system_paths = cfg.get("system_paths", {})
         self.phonopy_dim = cfg["phonopy"]["dim"]
         self.phonopy_amplitude = cfg["phonopy"]["amplitude"]
-        self.phonopy_band_points = cfg["phonopy"]["band_points"]
-        self.scf_kpoints_mesh = cfg["scf_kpoints"]["mesh"]
-        self.scf_kpoints_shift = cfg["scf_kpoints"]["shift"]
-        self.sup_relax_kpoints_mesh = cfg["sup_relax_kpoints"]["mesh"]
-        self.sup_relax_kpoints_shift = cfg["sup_relax_kpoints"]["shift"]
-        self.hf_kpoints_mesh = cfg["hf_kpoints"]["mesh"]
-        self.hf_kpoints_shift = cfg["hf_kpoints"]["shift"]
-        self.raman_kpoints_mesh = cfg["raman_kpoints"]["mesh"]
-        self.raman_kpoints_shift = cfg["raman_kpoints"]["shift"]
-        self.desired_energies = cfg["desired_energies"]
-        self.raman_incident_pol = cfg["raman_tensor"]["incident_polarization"]
-        self.raman_scattered_pol = cfg["raman_tensor"]["scattered_polarization"]
-        self.raman_surface_normal = cfg["raman_tensor"]["surface_normal"]
+        self.scf_kpoints_mesh        = _step_kp("scf_relax",    "mesh")
+        self.scf_kpoints_shift       = _step_kp("scf_relax",    "shift", "0 0 0")
+        self.sup_relax_kpoints_mesh  = _step_kp("supercell",    "mesh")
+        self.sup_relax_kpoints_shift = _step_kp("supercell",    "shift", "0 0 0")
+        self.hf_kpoints_mesh         = _step_kp("force_consts", "mesh")
+        self.hf_kpoints_shift        = _step_kp("force_consts", "shift", "0 0 0")
+        self.raman_kpoints_mesh      = _step_kp("resonant_vasp","mesh")
+        self.raman_kpoints_shift     = _step_kp("resonant_vasp","shift", "0 0 0")
+        self.defect_kpoints_mesh     = (_step_kp("defect_relax_1", "mesh")
+                                        or _step_kp("scf_relax", "mesh"))
+        self.defect_kpoints_shift    = (_step_kp("defect_relax_1", "shift", "")
+                                        or _step_kp("scf_relax", "shift", "0 0 0"))
+        _post = cfg.get("steps", {}).get("post_process", {})
+        self.desired_energies = _post.get("desired_energies", [])
+        _rt = _post.get("raman_tensor", {})
+        self.raman_incident_pol  = _rt.get("incident_polarization",  "1.0 0.0 0.0")
+        self.raman_scattered_pol = _rt.get("scattered_polarization", "1.0 0.0 0.0")
+        self.raman_surface_normal = _rt.get("surface_normal", "z")
         self.vasp_max_restarts = cfg["vasp_loop"]["max_restarts"]
         self.hf_parallel = cfg.get("hf_parallel", False)
         self.vasp_srun_per_dir = mode_cfg.get("srun_per_dir", "")
         self.vasp_sbatch_per_dir = mode_cfg.get("sbatch_per_dir", "")
-        self.vasp_gpus_per_dir = mode_cfg.get("gpus_per_dir", 4)
+        import re as _re
+        _gpn = _re.search(r'--gpus-per-node[=\s]+(\d+)', self.vasp_srun_per_dir)
+        self.vasp_gpus_per_dir = int(_gpn.group(1)) if _gpn else mode_cfg.get("gpus_per_dir", 4)
         self.salloc_relax = mode_cfg.get("salloc") or mode_cfg.get("salloc_relax", "")
         self.salloc_per_dir = mode_cfg.get("salloc") or mode_cfg.get("salloc_per_dir", "")
         self.start_from_supercell = cfg.get("start_from_supercell", False)
-        _cr = cfg.get("cpu_relax", {})
+        _cr = cfg.get("steps", {}).get("defect_relax_2_cpu", {}).get("cpu_relax", {})
         self.cpu_relax_srun_args   = mode_cfg.get("srun_cpu_relax", "")
         self.cpu_relax_vasp_binary = _cr.get("vasp_binary", "")
         _parts = []
@@ -205,14 +224,21 @@ class PipelineContext:
         for k, v in _omp.items():
             _parts.append(f"export {k}={v}")
         self.cpu_relax_setup_cmd = " && ".join(_parts) if _parts else ""
-        self.eigvec_band_path = cfg["eigenvectors_band"]["path"]
-        self.eigvec_band_labels = cfg["eigenvectors_band"]["labels"]
-        self.eigvec_band_points = cfg["eigenvectors_band"]["points"]
-        _viz = cfg.get("visualization", {})
+        _phonon_post = cfg.get("steps", {}).get("phonon_post", {})
+        _eigvec = _phonon_post.get("eigenvectors_band", {})
+        self.eigvec_band_path   = _eigvec.get("path", "0.0 0.0 0.0  0.0 0.0 0.0")
+        self.eigvec_band_labels = _eigvec.get("labels", "GAMMA GAMMA")
+        self.eigvec_band_points = _eigvec.get("points", 1)
+        _viz = _phonon_post.get("visualization", {})
         self.viz_enabled        = _viz.get("enabled", False)
         self.viz_scale_factor   = float(_viz.get("scale_factor", 0.5))
         self.viz_output_format  = _viz.get("output_format", "vesta").lower()
         self.viz_vesta_template = _viz.get("vesta_template", "template.vesta")
+        _broadening = cfg.get("steps", {}).get("post_process", {}).get("broadening", {})
+        self.broadening_mode          = _broadening.get("mode", 2)
+        self.broadening_hwhm          = _broadening.get("hwhm", 1)
+        self.broadening_interpolation = _broadening.get("interpolation", 200)
+        self.broadening_normalization = _broadening.get("normalization", 2)
 
     @property
     def config(self) -> dict:

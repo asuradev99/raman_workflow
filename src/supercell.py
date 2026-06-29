@@ -33,7 +33,7 @@ def run(ctx):
     print("  [setup] POSCAR-* + SPOSCAR in hf/")
     if not ctx.start_from_supercell:
         print("  [vasp] Supercell ionic relaxation...")
-        write_vasp_inputs(gs_dir, work_dir, ctx.config, "supercell_relax",
+        write_vasp_inputs(gs_dir, work_dir, ctx.config, "supercell",
                           ctx.sup_relax_kpoints_mesh, ctx.sup_relax_kpoints_shift,
                           "K-points for supercell")
         run_command(

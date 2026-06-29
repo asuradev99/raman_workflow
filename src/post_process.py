@@ -96,14 +96,13 @@ def run(ctx):
         run_command(f"{bin_dir}/raman_tensor < .raman_tensor_input > /dev/null",
                     cwd=raman_dir, check_success=not is_cpu)
         os.remove(input_file)
-        broadening_cfg = config.get("broadening", {})
         broadening_file = os.path.join(raman_dir, "broadening_input")
         b_content = (
             f"Raman_intensity_complex  !!! the file name\n"
-            f"{int(broadening_cfg.get('mode', 2))}            !!! peak broadening mode\n"
-            f"{int(broadening_cfg.get('hwhm', 1))}            !!! half width at half maximum (cm-1)\n"
-            f"{int(broadening_cfg.get('interpolation', 200))}  !!! interpolation points\n"
-            f"{int(broadening_cfg.get('normalization', 2))}    !!! normalization\n"
+            f"{int(ctx.broadening_mode)}            !!! peak broadening mode\n"
+            f"{int(ctx.broadening_hwhm)}            !!! half width at half maximum (cm-1)\n"
+            f"{int(ctx.broadening_interpolation)}  !!! interpolation points\n"
+            f"{int(ctx.broadening_normalization)}    !!! normalization\n"
         )
         with open(broadening_file, "w") as f:
             f.write(b_content)

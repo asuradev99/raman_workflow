@@ -26,41 +26,38 @@ def _format_incar(tags):
     return "\n".join(f"{tag} = {val}" for tag, val in tags.items())
 
 
-def build_incar_content(config, stage):
+def build_incar_content(config, step_name):
     """Assemble an INCAR file content string from YAML config sources.
 
-    Assembly logic:
-      1. Parse the base template and per-material overrides into tag→value dicts.
-      2. Remove any tags from the template that are also in the override.
-      3. Prepend the override block, then append the (stripped) template.
+    Reads ``config["steps"][step_name]["incar"]`` as the base template and
+    ``config["steps"][step_name]["incar_overrides"]`` for per-material tag
+    replacements.
 
-    This guarantees that overridden tags (e.g., ``IBRION``, ``KPAR``) appear
-    **first** in the INCAR. (VASP actually uses the *last* occurrence of a
-    repeated tag, not the first — but it doesn't matter here: the duplicate
-    is removed entirely from the template, so only one occurrence of each
-    tag ever appears in the final INCAR, and there's no ambiguity either way.)
+    Override tags appear first; duplicate template tags are removed so each
+    tag appears exactly once in the final INCAR.
 
     Parameters
     ----------
     config : dict
         The merged pipeline configuration.
-    stage : str
-        One of ``"relax"``, ``"dielec"``, ``"hf"``, or ``"supercell_relax"``.
+    step_name : str
+        Step name key under ``config["steps"]`` (e.g. ``"scf_relax"``,
+        ``"force_consts"``, ``"resonant_vasp"``).
 
     Returns
     -------
     str
         Complete INCAR file content ready to write to disk.
     """
-    templates = config.get("incar_templates", {})
-    template_text = templates.get(stage, "")
+    steps = config.get("steps", {})
+    template_text = steps.get(step_name, {}).get("incar", "")
     if not template_text:
         raise KeyError(
-            f"Missing incar_templates.{stage} in pipeline config. "
-            f"Available stages: {list(templates.keys())}"
+            f"Missing steps.{step_name}.incar in pipeline config. "
+            f"Available steps: {list(steps.keys())}"
         )
 
-    override_text = config.get("incar_settings", {}).get(stage, "")
+    override_text = steps.get(step_name, {}).get("incar_overrides", "")
 
     # No overrides — just return the template as-is
     if not override_text:
@@ -84,9 +81,9 @@ def build_incar_content(config, stage):
     return "\n".join(parts) + "\n"
 
 
-def write_incar(path, config, stage):
+def write_incar(path, config, step_name):
     """Assemble and write an INCAR file from YAML config."""
-    content = build_incar_content(config, stage)
+    content = build_incar_content(config, step_name)
     with open(path, "w") as f:
         f.write(content)
 

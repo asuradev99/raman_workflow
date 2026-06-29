@@ -126,14 +126,38 @@ def _run_direct(*pipeline_flags):
 
 def _is_complete():
     """Return True if every pipeline step's output files are present."""
+    import yaml
     from src import PIPELINE, STEP_REGISTRY
-    step_filter = CONFIG.get("pipeline_steps", None)
-    if step_filter is not None:
-        steps = [STEP_REGISTRY[n] for n in step_filter if n in STEP_REGISTRY]
+    with open(CONFIG_PATH) as _f:
+        _per_mat_raw = yaml.safe_load(_f) or {}
+    step_names = list(_per_mat_raw.get("steps", {}).keys())
+    if step_names:
+        steps = [STEP_REGISTRY[n] for n in step_names if n in STEP_REGISTRY]
     else:
         steps = PIPELINE
     for step in steps:
         if step._is_complete is None:
+            return False
+        try:
+            if not step._is_complete(work_dir, CONFIG):
+                return False
+        except Exception:
+            return False
+    return True
+
+
+def _are_relax_steps_done():
+    """Return True if all SALLOC_REQUIRED steps in the active pipeline are complete."""
+    import yaml
+    from src import STEP_REGISTRY, PRE_DISPATCH_STEP_NAMES
+    with open(CONFIG_PATH) as _f:
+        _per_mat_raw = yaml.safe_load(_f) or {}
+    step_names = list(_per_mat_raw.get("steps", {}).keys())
+    for name in step_names:
+        if name not in PRE_DISPATCH_STEP_NAMES:
+            continue
+        step = STEP_REGISTRY.get(name)
+        if step is None or step._is_complete is None:
             return False
         try:
             if not step._is_complete(work_dir, CONFIG):
@@ -201,13 +225,33 @@ elif compute_mode in ("sbatch_parallel", "sbatch"):
     sys.exit(0 if _is_complete() else 42)
 
 elif compute_mode in ("sbatch_serial", "sbatch_mix"):
-    # One big sbatch job runs the full pipeline (--inside-salloc so per-step
-    # dispatch doesn't try to allocate further sub-jobs).
+    # Two-phase when sbatch_relax is set: Phase 1 sbatch runs relax+hf_setup
+    # (--salloc-steps stops after SALLOC_REQUIRED steps); Phase 2 sbatch runs
+    # force_consts onward on the full node allocation.  When sbatch_relax is
+    # absent, falls back to one big job (original behaviour).
     sbatch_args = cm_cfg.get("sbatch", "")
     if not sbatch_args:
         print(f"Error: compute_modes.{compute_mode}.sbatch not configured.")
         sys.exit(1)
-    print(f"[provision] Submitting sbatch job ({sbatch_args})")
+
+    sbatch_relax_args = cm_cfg.get("sbatch_relax", "")
+    if sbatch_relax_args and not _are_relax_steps_done():
+        print(f"[provision] Phase 1 — relax+hf_setup sbatch ({sbatch_relax_args})")
+        try:
+            ok = submit_sbatch_wrapper(
+                _salloc_wrapper("--inside-salloc", "--salloc-steps"),
+                job_name=f"relax_{MATERIAL_NAME}",
+                output_dir=work_dir,
+                sbatch_args=sbatch_relax_args,
+            )
+        except SbatchCancelledError as e:
+            print(f"[provision] {e}")
+            sys.exit(1)
+        if not ok:
+            print(f"[provision] Phase 1 sbatch failed.")
+            sys.exit(1)
+
+    print(f"[provision] Phase 2 — main pipeline sbatch ({sbatch_args})")
     try:
         ok = submit_sbatch_wrapper(
             _salloc_wrapper("--inside-salloc"),

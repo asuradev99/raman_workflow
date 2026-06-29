@@ -34,7 +34,7 @@ def run(ctx):
                 os.remove(dst)
             os.symlink(f"../scf/{f}", dst)
 
-    write_vasp_inputs(raman_dir, work_dir, ctx.config, "dielec",
+    write_vasp_inputs(raman_dir, work_dir, ctx.config, "resonant_vasp",
                       ctx.raman_kpoints_mesh, ctx.raman_kpoints_shift,
                       "K-points for resonant Raman")
 

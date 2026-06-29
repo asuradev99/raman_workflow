@@ -58,14 +58,8 @@ def contcar_path(mat_dir, config, per):
     Uses only per-material config for inference to avoid being misled by shared
     defect templates that exist for all materials.
     """
-    pipeline_steps = per.get("pipeline_steps")
-
-    if pipeline_steps is not None:
-        two_stage = any(s in pipeline_steps for s in ("defect_relax_2", "defect_relax_2_cpu"))
-    else:
-        # Infer from per-material incar_settings only (not shared templates)
-        per_settings = per.get("incar_settings", {})
-        two_stage = "defect_relax_full" in per_settings and "defect_relax_fixed" in per_settings
+    per_step_names = list(per.get("steps", {}).keys())
+    two_stage = any(s in per_step_names for s in ("defect_relax_2", "defect_relax_2_cpu"))
 
     if two_stage:
         rel, stage = "scf2/CONTCAR", "scf2"
@@ -125,10 +119,11 @@ def write_phonon_csv(out_path, bands, irreps):
 
 
 def write_lattice_csv(out_path, mat_dir, stage, a_sup, c, config, per):
-    # Extract GGA and NELECT from per-material incar_settings, falling back to relax template
+    # Extract GGA and NELECT from per-material incar_overrides, falling back to shared incar template
     gga, nelect = "", ""
-    for block_key in ("defect_relax_fixed", "relax"):
-        block = per.get("incar_settings", {}).get(block_key, "")
+    per_steps = per.get("steps", {})
+    for step_key in ("defect_relax_1", "scf_relax"):
+        block = per_steps.get(step_key, {}).get("incar_overrides", "") or ""
         for line in block.splitlines():
             if not gga and "GGA" in line:
                 gga = line.split("=")[-1].strip()
@@ -136,10 +131,11 @@ def write_lattice_csv(out_path, mat_dir, stage, a_sup, c, config, per):
                 nelect = line.split("=")[-1].strip()
         if gga or nelect:
             break
-    # Fall back to shared incar_templates if per-material had nothing
+    # Fall back to shared steps incar template
     if not gga:
-        for block_key in ("relax", "defect_relax_fixed"):
-            block = config.get("incar_templates", {}).get(block_key, "")
+        shared_steps = config.get("steps", {})
+        for step_key in ("defect_relax_1", "scf_relax"):
+            block = shared_steps.get(step_key, {}).get("incar", "") or ""
             for line in block.splitlines():
                 if not gga and "GGA" in line:
                     gga = line.split("=")[-1].strip()

@@ -25,20 +25,12 @@ RELAX_LABEL_DEFECT_2_CPU = "Defect relax 2 (CPU)"
 
 
 def relax_labels(config: dict, start_from_supercell: bool) -> list:
-    """Label(s) the relax step uses for this material's config.
+    """Label(s) for the scf_relax step — always the single unit-cell relaxation.
 
-    Two-stage defect relax (relax 1 + relax 2) if the config requests it and
-    provides both INCAR templates; otherwise the standard single-stage
-    unit-cell relaxation.
+    Defect two-stage relaxation is handled by the separate defect_relax_1 /
+    defect_relax_2 / defect_relax_2_cpu entries in STEP_REGISTRY; they are
+    never dispatched through this step.
     """
-    templates = config.get("incar_templates", {})
-    has_defect_pair = (
-        start_from_supercell
-        and "defect_relax_fixed" in templates
-        and "defect_relax_full" in templates
-    )
-    if has_defect_pair:
-        return [RELAX_LABEL_DEFECT_1, RELAX_LABEL_DEFECT_2]
     return [RELAX_LABEL_SINGLE]
 
 

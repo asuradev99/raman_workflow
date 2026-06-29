@@ -37,13 +37,16 @@ def _relax_stage(ctx, stage, scf_dir, label,
     return ok, time.time() - t0
 
 
-def _setup_scf(ctx):
+def _setup_scf(ctx, mesh=None, shift=None):
     """Idempotent scf/ directory setup — mkdir, POSCAR/POTCAR, seed files, KPOINTS.
 
     POSCAR is only copied from input/ if scf/POSCAR does not already exist,
     so crash-resume state (CONTCAR copied over POSCAR) is preserved across calls.
     Returns the absolute path to scf/.
     """
+    mesh = mesh or ctx.scf_kpoints_mesh
+    shift = shift or ctx.scf_kpoints_shift
+
     scf_dir = os.path.join(ctx.work_dir, "scf")
     os.makedirs(scf_dir, exist_ok=True)
     input_dir = os.path.join(ctx.material_dir, "input")
@@ -80,8 +83,8 @@ def _setup_scf(ctx):
     write_kpoints(
         os.path.join(scf_dir, "KPOINTS"),
         "K-points for SCF",
-        ctx.scf_kpoints_mesh,
-        ctx.scf_kpoints_shift,
+        mesh,
+        shift,
     )
     return scf_dir
 
@@ -128,8 +131,8 @@ def _setup_scf2(ctx):
     write_kpoints(
         os.path.join(scf2_dir, "KPOINTS"),
         "K-points for defect supercell relax 2",
-        ctx.scf_kpoints_mesh,
-        ctx.scf_kpoints_shift,
+        ctx.defect_kpoints_mesh,
+        ctx.defect_kpoints_shift,
     )
     return scf2_dir
 
@@ -138,7 +141,7 @@ def run_defect_1(ctx):
     """Granular step: defect stage 1 only — lattice-fixed atomic relaxation (GPU)."""
     write_status = ctx.write_status
     label = ctx.current_label
-    scf_dir = _setup_scf(ctx)
+    scf_dir = _setup_scf(ctx, ctx.defect_kpoints_mesh, ctx.defect_kpoints_shift)
 
     contcar_relax1 = os.path.join(scf_dir, "CONTCAR_ISIF2")
     if os.path.exists(contcar_relax1):
@@ -149,7 +152,7 @@ def run_defect_1(ctx):
 
     t_start = begin_step(ctx, "Defect relax 1 (lattice fixed)")
     _resume_contcar(scf_dir, "relax1")
-    ok, dt = _relax_stage(ctx, "defect_relax_fixed", scf_dir, "defect-relax1")
+    ok, dt = _relax_stage(ctx, "defect_relax_1", scf_dir, "defect-relax1")
     if not ok:
         _relax_fail(write_status, label, dt, "Defect relax 1 failed", scf_dir)
 
@@ -163,13 +166,13 @@ def run_defect_1(ctx):
     _relax_ok(write_status, label, time.time() - t_start, "Relax 1 converged")
 
 
-def _run_defect_2_impl(ctx, srun_args=None, vasp_binary=None, setup_cmd=""):
+def _run_defect_2_impl(ctx, step_name="defect_relax_2", srun_args=None, vasp_binary=None, setup_cmd=""):
     """Shared implementation for defect stage 2 (GPU and CPU variants)."""
     write_status = ctx.write_status
     label = ctx.current_label
     scf2_dir = _setup_scf2(ctx)
     t_start = begin_step(ctx, "Defect relax 2 (full)")
-    ok, dt = _relax_stage(ctx, "defect_relax_full", scf2_dir, "defect-relax2",
+    ok, dt = _relax_stage(ctx, step_name, scf2_dir, "defect-relax2",
                           srun_args=srun_args, vasp_binary=vasp_binary,
                           setup_cmd=setup_cmd)
     if not ok:
@@ -179,13 +182,14 @@ def _run_defect_2_impl(ctx, srun_args=None, vasp_binary=None, setup_cmd=""):
 
 def run_defect_2(ctx):
     """Granular step: defect stage 2 only — full relaxation (GPU)."""
-    _run_defect_2_impl(ctx)
+    _run_defect_2_impl(ctx, step_name="defect_relax_2")
 
 
 def run_defect_2_cpu(ctx):
     """Granular step: defect stage 2 only — full relaxation (CPU)."""
     _run_defect_2_impl(
         ctx,
+        step_name="defect_relax_2_cpu",
         srun_args=ctx.cpu_relax_srun_args,
         vasp_binary=ctx.cpu_relax_vasp_binary,
         setup_cmd=ctx.cpu_relax_setup_cmd,
@@ -206,24 +210,13 @@ def _relax_fail(write_status, label, duration_s, short_msg, scf_dir):
 
 
 def run(ctx):
+    """Standard unit-cell relaxation (scf_relax step)."""
     write_status = ctx.write_status
     config = ctx.config
 
-    scf_dir = os.path.join(ctx.work_dir, "scf")
-    run_command(f"mkdir -p {scf_dir}", cwd=ctx.work_dir)
-
-    input_dir = os.path.join(ctx.material_dir, "input")
-    for vasp_input in ("POSCAR", "POTCAR"):
-        src = os.path.join(input_dir, vasp_input)
-        require_file(src, f"input/{vasp_input}")
-        run_command(f"cp input/{vasp_input} scf/{vasp_input}", cwd=ctx.work_dir)
+    scf_dir = _setup_scf(ctx)
 
     # Optionally seed CHGCAR/WAVECAR from a previous calculation (YAML-configured).
-    # COPY rather than symlink: VASP overwrites scf/WAVECAR and scf/CHGCAR at run
-    # end — if those were symlinks, the write goes through to the shared seed file,
-    # corrupting it for every other material pointed at the same seed path.
-    # Bootstrap from seed only ONCE: if scf/ already has its own real WAVECAR/CHGCAR
-    # (written by relax 1, or left from a crash), don't overwrite.
     seed = config.get("seed_files", {})
     for seed_file in ("CHGCAR", "WAVECAR"):
         src = seed.get(seed_file.lower(), "")
@@ -243,87 +236,18 @@ def run(ctx):
         shutil.copy2(src, dst)
         print(f"  [seed] Copied {seed_file} → scf/ ({os.path.getsize(src)} bytes)")
 
-    # ── Detect two-stage defect relaxation ───────────────────────────────────
-    templates = config.get("incar_templates", {})
-    has_defect_pair = (
-        ctx.start_from_supercell
-        and "defect_relax_fixed" in templates
-        and "defect_relax_full" in templates
-    )
+    print_step_header(RELAX_LABEL_SINGLE)
+    write_status(RELAX_LABEL_SINGLE, "running", "Initial VASP relaxation")
+    t_start = time.time()
 
-    if has_defect_pair:
-        contcar_relax1 = os.path.join(scf_dir, "CONTCAR_ISIF2")
-        skip_relax1 = os.path.exists(contcar_relax1)
+    print(f"  [setup] KPOINTS ({ctx.scf_kpoints_mesh}) written to scf/")
+    _resume_contcar(scf_dir)
 
-        # KPOINTS are the same for both stages — write once
-        write_kpoints(
-            os.path.join(scf_dir, "KPOINTS"),
-            "K-points for defect supercell relaxation",
-            ctx.scf_kpoints_mesh,
-            ctx.scf_kpoints_shift,
-        )
-
-        # ── Stage 1: lattice-fixed atomic relaxation ──────────────────────────
-        if skip_relax1:
-            print(f"  [defect] Found existing relax 1 CONTCAR — skipping to relax 2")
-            write_status(RELAX_LABEL_DEFECT_1, "completed",
-                         "Defect relax 1 already converged (prior run)")
-        else:
-            print_step_header(RELAX_LABEL_DEFECT_1)
-            write_status(RELAX_LABEL_DEFECT_1, "running", "Defect relax 1 (lattice fixed)")
-            t1_start = time.time()
-            _resume_contcar(scf_dir, "relax1")
-
-            ok1, dt1 = _relax_stage(ctx, "defect_relax_fixed", scf_dir, "defect-relax1")
-            if not ok1:
-                _relax_fail(write_status, RELAX_LABEL_DEFECT_1, dt1,
-                            "Defect relax 1 failed", scf_dir)
-
-            # Save relax 1 CONTCAR and outputs before relax 2 overwrites them
-            shutil.copy2(os.path.join(scf_dir, "CONTCAR"), contcar_relax1)
-            print(f"  [defect] Saved relax 1 CONTCAR → CONTCAR_ISIF2")
-            for fname in ("OUTCAR", "OSZICAR"):
-                src = os.path.join(scf_dir, fname)
-                if os.path.exists(src):
-                    shutil.copy2(src, os.path.join(scf_dir, f"{fname}_ISIF2"))
-
-            _relax_ok(write_status, RELAX_LABEL_DEFECT_1,
-                      time.time() - t1_start, "Relax 1 converged")
-            print(f"  [defect] Relax 1 converged — starting relax 2")
-
-        # ── Stage 2: full relaxation in scf2/ ────────────────────────────────
-        print_step_header(RELAX_LABEL_DEFECT_2)
-        write_status(RELAX_LABEL_DEFECT_2, "running", "Defect relax 2 (full)")
-        t2_start = time.time()
-        scf2_dir = _setup_scf2(ctx)
-        ok2, dt2 = _relax_stage(ctx, "defect_relax_full", scf2_dir, "defect-relax2")
-        if not ok2:
-            _relax_fail(write_status, RELAX_LABEL_DEFECT_2, dt2,
-                        "Defect relax 2 failed", scf2_dir)
-        _relax_ok(write_status, RELAX_LABEL_DEFECT_2,
-                  time.time() - t2_start, "Relax 2 converged")
-
-    else:
-        # ── Standard unit-cell relaxation ────────────────────────────────────
-        print_step_header(RELAX_LABEL_SINGLE)
-        write_status(RELAX_LABEL_SINGLE, "running", "Initial VASP relaxation")
-        t_start = time.time()
-
-        write_kpoints(
-            os.path.join(scf_dir, "KPOINTS"),
-            "K-points for unit cell SCF",
-            ctx.scf_kpoints_mesh,
-            ctx.scf_kpoints_shift,
-        )
-        print(f"  [setup] Wrote unit cell KPOINTS ({ctx.scf_kpoints_mesh}) to scf/")
-        _resume_contcar(scf_dir)
-
-        ok, dt = _relax_stage(ctx, "relax", scf_dir, "step-1")
-        if not ok:
-            _relax_fail(write_status, RELAX_LABEL_SINGLE, dt,
-                        "Relaxation failed", scf_dir)
-        _relax_ok(write_status, RELAX_LABEL_SINGLE,
-                  time.time() - t_start, "Initial VASP relaxation finished")
+    ok, dt = _relax_stage(ctx, "scf_relax", scf_dir, "step-1")
+    if not ok:
+        _relax_fail(write_status, RELAX_LABEL_SINGLE, dt, "Relaxation failed", scf_dir)
+    _relax_ok(write_status, RELAX_LABEL_SINGLE,
+              time.time() - t_start, "Initial VASP relaxation finished")
 
 
 # ── File-based completion checks ────────────────────────────────────────────
@@ -341,13 +265,5 @@ def is_complete_defect_2(work_dir, config):
 
 def is_complete(work_dir, config):
     scf = os.path.join(work_dir, "scf")
-    templates = config.get("incar_templates", {})
-    has_defect_pair = (
-        config.get("start_from_supercell", False)
-        and "defect_relax_fixed" in templates
-        and "defect_relax_full" in templates
-    )
-    if has_defect_pair:
-        return is_complete_defect_1(work_dir, config) and is_complete_defect_2(work_dir, config)
     c = os.path.join(scf, "CONTCAR")
     return is_calculation_complete(scf) and os.path.exists(c) and os.path.getsize(c) > 0
