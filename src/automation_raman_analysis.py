@@ -15,7 +15,7 @@ from util import (
     Tee, run_command, load_config, validate_config, get_srun_args,
     make_pipeline_excepthook, run_relaxation,
     print_job_header, make_write_status,
-    set_expected_labels, do_restart_cleanup, require_path,
+    set_expected_labels, require_path,
 )
 
 # ── CLI flags via argparse ──────────────────────────────────────────────────
@@ -75,9 +75,7 @@ WORK_DIR = os.path.join(_scratch_base, "vasp_calculations", CWD_BASENAME) if SCR
 STATUS_FILE = os.path.join(WORK_DIR, "workflow.log")
 OUTPUT_FILE = os.path.join(WORK_DIR, "workflow.out")
 
-# ── --restart: delete all generated directories, keep input/ + config ────────
-if RESTART_FLAG:
-    do_restart_cleanup(MATERIAL_DIR, WORK_DIR, SCRATCH_FLAG)
+# --restart pre-pass is deferred to after STEP_REGISTRY loads (below).
 
 # Redirect ALL output AFTER restart cleanup so logs are fresh.
 # (Must come after cleanup — otherwise Tee holds file handles open,
@@ -203,6 +201,21 @@ else:
     EXPECTED = expected_labels(CONFIG, START_FROM_SUPERCELL)
 
 set_expected_labels(EXPECTED)
+
+# ── Per-step restart pre-pass ─────────────────────────────────────────────────
+# Restarts exactly the steps in PIPELINE_TO_RUN (the `steps:` section in YAML,
+# or all steps if no section is present). Runs before the dispatch loop so all
+# cleared steps start from a clean slate.
+if RESTART_FLAG:
+    _restart_names = [s.name for s in PIPELINE_TO_RUN]
+    print(f"\n[restart] Restarting: {', '.join(_restart_names)}")
+    for _rstep in PIPELINE_TO_RUN:
+        if _rstep._restart is None:
+            print(f"  [restart] WARNING: '{_rstep.name}' has no restart() — skipped")
+            continue
+        print(f"  [restart] Cleaning outputs for: {_rstep.name}")
+        _rstep._restart(WORK_DIR, CONFIG)
+    print("[restart] Pre-pass complete. Pipeline will re-run cleared steps.\n")
 
 
 def _step_is_done(step, work_dir, config):

@@ -1,6 +1,6 @@
 """Step 6 — Raman directory setup + displacement generation."""
 import os, time, glob
-from util.io import run_command, require_file
+from util.io import run_command, require_file, restart_rmtree
 from util.incar import write_vasp_inputs
 from util.symlinks import update_raman_symlinks
 from util.status import begin_step, print_step_result
@@ -60,3 +60,8 @@ def run(ctx):
 
 def is_complete(work_dir, config):
     return bool(glob.glob(os.path.join(work_dir, "raman", "ra_pos_*")))
+
+
+def restart(work_dir, config):
+    """Remove the entire raman/ directory."""
+    restart_rmtree(os.path.join(work_dir, "raman"))

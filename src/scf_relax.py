@@ -1,7 +1,7 @@
 """Step 1 — Initial VASP relaxation (unit cell or defect supercell)."""
 
 import os, time, shutil
-from util.io import run_command, require_file
+from util.io import run_command, require_file, restart_rmtree, restart_rm, restart_vasp_outputs
 from util.incar import write_incar, write_kpoints
 from util.vasp import is_calculation_complete
 from util.status import (
@@ -248,6 +248,27 @@ def run(ctx):
         _relax_fail(write_status, RELAX_LABEL_SINGLE, dt, "Relaxation failed", scf_dir)
     _relax_ok(write_status, RELAX_LABEL_SINGLE,
               time.time() - t_start, "Initial VASP relaxation finished")
+
+
+# ── Restart functions ────────────────────────────────────────────────────────
+
+def restart(work_dir, config):
+    """Remove scf/ and scf2/ (standard non-defect restart)."""
+    for d in ("scf", "scf2"):
+        restart_rmtree(os.path.join(work_dir, d))
+
+
+def restart_defect_1(work_dir, config):
+    """Remove CONTCAR_ISIF2 and VASP outputs from scf/ (defect stage 1)."""
+    scf_dir = os.path.join(work_dir, "scf")
+    for f in ("CONTCAR_ISIF2", "OUTCAR_ISIF2", "OSZICAR_ISIF2"):
+        restart_rm(os.path.join(scf_dir, f))
+    restart_vasp_outputs(scf_dir)
+
+
+def restart_defect_2(work_dir, config):
+    """Remove scf2/ (shared by defect_relax_2 and defect_relax_2_cpu)."""
+    restart_rmtree(os.path.join(work_dir, "scf2"))
 
 
 # ── File-based completion checks ────────────────────────────────────────────

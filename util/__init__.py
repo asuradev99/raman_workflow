@@ -6,7 +6,8 @@ Re-exports from submodules for backward compatibility with
 
 from .io import (Tee, run_command, fmt_time, calc_duration,
                  make_pipeline_excepthook, print_job_header,
-                 do_restart_cleanup, require_path, require_file)
+                 do_restart_cleanup, require_path, require_file,
+                 restart_rmtree, restart_rm, restart_vasp_outputs)
 from .vasp import (
     check_vasp_convergence, check_dielectric_complete, count_ionic_steps,
     is_calculation_complete, is_vasprun_valid, check_no_selective_dynamics,

@@ -158,6 +158,34 @@ def require_file(path, label=None):
         raise FileNotFoundError(f"{name} not found at {path}")
 
 
+# ── Per-step restart helpers ──────────────────────────────────────────────────
+
+def restart_rmtree(path):
+    """Remove a directory tree if it exists and is not a symlink."""
+    if os.path.exists(path) and not os.path.islink(path):
+        shutil.rmtree(path)
+        print(f"  [restart] Removed: {path}/")
+
+
+def restart_rm(path):
+    """Remove a file if it exists and is not a symlink."""
+    if os.path.exists(path) and not os.path.islink(path):
+        os.remove(path)
+        print(f"  [restart] Removed: {path}")
+
+
+_VASP_OUTPUT_FILES = (
+    "OUTCAR", "vasprun.xml", "OSZICAR", "DOSCAR", "EIGENVAL",
+    "IBZKPT", "CHG", "CHGCAR", "WAVECAR", "relaxation.stdout",
+)
+
+
+def restart_vasp_outputs(dirpath):
+    """Remove standard VASP output files from a directory, skipping symlinks."""
+    for fname in _VASP_OUTPUT_FILES:
+        restart_rm(os.path.join(dirpath, fname))
+
+
 def make_pipeline_excepthook(status_file):
     """Return a sys.excepthook that appends a formatted traceback to *status_file* on crash."""
     def hook(exc_type, exc_value, exc_tb):

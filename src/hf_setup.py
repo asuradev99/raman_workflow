@@ -1,6 +1,6 @@
 """Step 3 — hf/ directory setup (copy, verify, runHF, symlinks)."""
 import os, time, glob
-from util.io import run_command, require_file
+from util.io import run_command, require_file, restart_rmtree, restart_rm
 from util.incar import write_vasp_inputs
 from util.phonopy import ensure_dim_in_conf
 from util.symlinks import update_hf_symlinks
@@ -82,3 +82,12 @@ def run(ctx):
 
 def is_complete(work_dir, config):
     return bool(glob.glob(os.path.join(work_dir, "hf", "hf_POSCAR-*")))
+
+
+def restart(work_dir, config):
+    """Remove hf_POSCAR-*/ dirs and shared INCAR/KPOINTS/POTCAR/symmetry.conf from hf/."""
+    hf_dir = os.path.join(work_dir, "hf")
+    for d in glob.glob(os.path.join(hf_dir, "hf_POSCAR-*")):
+        restart_rmtree(d)
+    for f in ("INCAR", "KPOINTS", "POTCAR", "symmetry.conf"):
+        restart_rm(os.path.join(hf_dir, f))

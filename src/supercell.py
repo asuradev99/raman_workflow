@@ -1,7 +1,7 @@
 """Step 2 — Supercell generation + ionic relaxation."""
 
-import os, time
-from util.io import run_command, require_file
+import os, time, glob
+from util.io import run_command, require_file, restart_rmtree, restart_rm
 from util.incar import write_vasp_inputs
 from util.vasp import (
     check_vasp_convergence,
@@ -58,3 +58,13 @@ def run(ctx):
 def is_complete(work_dir, config):
     p = os.path.join(work_dir, "hf", "groundstate", "CONTCAR")
     return os.path.exists(p) and os.path.getsize(p) > 0
+
+
+def restart(work_dir, config):
+    """Remove groundstate/ and phonopy displacement outputs from hf/."""
+    hf_dir = os.path.join(work_dir, "hf")
+    restart_rmtree(os.path.join(hf_dir, "groundstate"))
+    for name in ("POSCAR_unitcell", "SPOSCAR", "CONTCAR_supercell_relaxed", "CONTCAR"):
+        restart_rm(os.path.join(hf_dir, name))
+    for p in glob.glob(os.path.join(hf_dir, "POSCAR-*")):
+        restart_rm(p)

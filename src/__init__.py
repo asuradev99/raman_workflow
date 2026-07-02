@@ -37,11 +37,16 @@ class Step:
     `_is_complete` is an optional `(work_dir, config) -> bool` function used
     for file-based resume: if it returns True the step is skipped without
     consulting workflow.log. None means "always run".
+
+    `_restart` is an optional `(work_dir, config) -> None` function that
+    deletes only the files this step creates. Called during the pre-pass when
+    --restart is set and this step appears in restart_steps in the YAML.
     """
     name: str           # stable slug used in dispatch log lines + salloc boundary checks
     labels: Any          # list[str] OR Callable[[dict, bool], list[str]]
     _run: Callable[[PipelineContext], None]
     _is_complete: Any = None   # Callable[[str, dict], bool] | None
+    _restart: Any = None       # Callable[[str, dict], None] | None
 
     def run(self, ctx: PipelineContext) -> None:
         self._run(ctx)
@@ -53,14 +58,14 @@ class Step:
 
 
 PIPELINE: list[Step] = [
-    Step("scf_relax",     relax_labels,                            scf_relax.run,         scf_relax.is_complete),
-    Step("supercell",     ["Supercell generation + relaxation"],   supercell.run,         supercell.is_complete),
-    Step("hf_setup",      ["hf/ directory setup"],                 hf_setup.run,          hf_setup.is_complete),
-    Step("force_consts",  ["VASP force constants"],                force_constants.run,   force_constants.is_complete),
-    Step("phonon_post",   ["Phonon postprocessing"],               phonon_post.run,       phonon_post.is_complete),
-    Step("raman_prep",    ["Raman setup + displacements"],         raman_prep.run,        raman_prep.is_complete),
-    Step("resonant_vasp", ["Resonant VASP (dielectric)"],          resonant_vasp.run,     resonant_vasp.is_complete),
-    Step("post_process",  ["Post-processing + output"],            post_process.run,      post_process.is_complete),
+    Step("scf_relax",     relax_labels,                            scf_relax.run,         scf_relax.is_complete,        scf_relax.restart),
+    Step("supercell",     ["Supercell generation + relaxation"],   supercell.run,         supercell.is_complete,        supercell.restart),
+    Step("hf_setup",      ["hf/ directory setup"],                 hf_setup.run,          hf_setup.is_complete,         hf_setup.restart),
+    Step("force_consts",  ["VASP force constants"],                force_constants.run,   force_constants.is_complete,  force_constants.restart),
+    Step("phonon_post",   ["Phonon postprocessing"],               phonon_post.run,       phonon_post.is_complete,      phonon_post.restart),
+    Step("raman_prep",    ["Raman setup + displacements"],         raman_prep.run,        raman_prep.is_complete,       raman_prep.restart),
+    Step("resonant_vasp", ["Resonant VASP (dielectric)"],          resonant_vasp.run,     resonant_vasp.is_complete,    resonant_vasp.restart),
+    Step("post_process",  ["Post-processing + output"],            post_process.run,      post_process.is_complete,     post_process.restart),
 ]
 
 
@@ -71,18 +76,21 @@ STEP_REGISTRY.update({
         ["Defect relax 1 (lattice fixed)"],
         scf_relax.run_defect_1,
         scf_relax.is_complete_defect_1,
+        scf_relax.restart_defect_1,
     ),
     "defect_relax_2": Step(
         "defect_relax_2",
         ["Defect relax 2 (full)"],
         scf_relax.run_defect_2,
         scf_relax.is_complete_defect_2,
+        scf_relax.restart_defect_2,
     ),
     "defect_relax_2_cpu": Step(
         "defect_relax_2_cpu",
         [RELAX_LABEL_DEFECT_2_CPU],
         scf_relax.run_defect_2_cpu,
         scf_relax.is_complete_defect_2,
+        scf_relax.restart_defect_2,
     ),
 })
 

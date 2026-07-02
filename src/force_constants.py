@@ -1,6 +1,7 @@
 """Step 4 — VASP force constants (mode-dispatched)."""
 
-import os, time
+import os, time, glob
+from util.io import restart_rm, restart_vasp_outputs
 from util.compute import dispatch_vasp_runs
 from util.vasp import check_no_selective_dynamics, is_calculation_complete, check_vasp_convergence
 from util.vasp_loop import list_hf_dirs, run_vasp_in_dirs
@@ -57,3 +58,11 @@ def run(ctx):
 def is_complete(work_dir, config):
     p = os.path.join(work_dir, "hf", "FORCE_SETS")
     return os.path.exists(p) and os.path.getsize(p) > 0
+
+
+def restart(work_dir, config):
+    """Remove VASP outputs from all hf_POSCAR-*/ dirs and delete FORCE_SETS."""
+    hf_dir = os.path.join(work_dir, "hf")
+    for hf_pos_dir in glob.glob(os.path.join(hf_dir, "hf_POSCAR-*")):
+        restart_vasp_outputs(hf_pos_dir)
+    restart_rm(os.path.join(hf_dir, "FORCE_SETS"))

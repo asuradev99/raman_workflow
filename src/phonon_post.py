@@ -1,7 +1,7 @@
 """Step 5 — Phonon postprocessing."""
 
 import os, time, glob
-from util.io import run_command
+from util.io import run_command, restart_rm
 from util.phonopy import ensure_dim_in_conf, write_eigenvectors_conf
 from util.status import begin_step, print_step_result
 
@@ -58,3 +58,13 @@ def run(ctx):
 def is_complete(work_dir, config):
     p = os.path.join(work_dir, "hf", "band.yaml")
     return os.path.exists(p) and os.path.getsize(p) > 0
+
+
+def restart(work_dir, config):
+    """Remove phonopy postprocessing outputs from hf/."""
+    hf_dir = os.path.join(work_dir, "hf")
+    for f in ("band.yaml", "irreps.yaml", "mesh.yaml", "phonopy.yaml",
+              "phonopy_disp.yaml", "eigenvectors.yaml", "eigenvectors.conf"):
+        restart_rm(os.path.join(hf_dir, f))
+    for p in glob.glob(os.path.join(hf_dir, "band*.png")):
+        restart_rm(p)

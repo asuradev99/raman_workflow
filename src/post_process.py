@@ -1,6 +1,6 @@
 """Step 8 — Post-processing (kopia, RAMFILE, energy loop, SpectroPy, output)."""
 import os, time, glob, shutil
-from util.io import run_command, require_file
+from util.io import run_command, require_file, restart_rmtree
 from util.postproc import generate_kopia_script, inject_ramfile_energies
 from util.status import begin_step, print_step_result
 
@@ -162,3 +162,8 @@ def run(ctx):
 def is_complete(work_dir, config):
     raman_data = os.path.join(work_dir, "output", "raman_data")
     return os.path.isdir(raman_data) and bool(os.listdir(raman_data))
+
+
+def restart(work_dir, config):
+    """Remove the output/ directory."""
+    restart_rmtree(os.path.join(work_dir, "output"))
