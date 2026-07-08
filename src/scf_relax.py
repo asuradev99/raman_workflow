@@ -1,7 +1,7 @@
 """Step 1 — Initial VASP relaxation (unit cell or defect supercell)."""
 
 import os, time, shutil
-from util.io import run_command, require_file, restart_rmtree, restart_rm, restart_vasp_outputs
+from util.io import run_command, require_file, restart_rmtree
 from util.incar import write_incar, write_kpoints
 from util.vasp import is_calculation_complete
 from util.status import (
@@ -33,6 +33,7 @@ def _relax_stage(ctx, stage, scf_dir, label,
         vasp_binary if vasp_binary is not None else ctx.vasp_binary,
         stage_label=label,
         setup_cmd=setup_cmd,
+        system_paths=ctx.system_paths,
     )
     return ok, time.time() - t0
 
@@ -259,11 +260,18 @@ def restart(work_dir, config):
 
 
 def restart_defect_1(work_dir, config):
-    """Remove CONTCAR_ISIF2 and VASP outputs from scf/ (defect stage 1)."""
-    scf_dir = os.path.join(work_dir, "scf")
-    for f in ("CONTCAR_ISIF2", "OUTCAR_ISIF2", "OSZICAR_ISIF2"):
-        restart_rm(os.path.join(scf_dir, f))
-    restart_vasp_outputs(scf_dir)
+    """Remove scf/ entirely (defect stage 1).
+
+    scf/ belongs exclusively to defect_relax_1's working state --
+    _setup_scf() unconditionally regenerates everything it needs (POTCAR
+    copy, KPOINTS write, INCAR write, POSCAR copy from input/ when absent)
+    on every run, so a full rmtree loses nothing and needs no maintenance
+    as VASP's output file set changes (unlike a surgical per-file list,
+    which silently misses whatever wasn't enumerated -- e.g. XDATCAR,
+    PCDAT, PROCAR, vaspout.h5, WAVEDER). scf2/ (defect_relax_2's stage) is
+    a separate directory with its own restart_defect_2, untouched here.
+    """
+    restart_rmtree(os.path.join(work_dir, "scf"))
 
 
 def restart_defect_2(work_dir, config):

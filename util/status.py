@@ -117,54 +117,110 @@ def finish_dispatch_step(ctx, ok, t_start, n_dirs, compute_mode, name):
                       message=f"{n_dirs} dirs ({compute_mode})")
 
 
-# ── Status table writer ────────────────────────────────────────────────────
+def _icon(sts):
+    return {"completed": "✓", "running": "▶", "failed": "✗"}.get(sts, "—")
+
+
+def _boxed(line):
+    """Wrap a single line in a box so it visually stands out when scanning
+    the log -- especially now that module-load/conda-activate stderr is no
+    longer suppressed and can appear between a step's running/completed lines.
+    """
+    width = len(line) + 2
+    top = "┌" + "─" * width + "┐"
+    mid = f"│ {line} │"
+    bot = "└" + "─" * width + "┘"
+    return "\n".join(["", top, mid, bot, ""])
+
+
+# ── Concise per-transition log line ─────────────────────────────────────────
 def write_status(label, status, message="", *,
                  status_file, material_label, material_name, base_project_dir):
-    """Write a combined status-overview + chronological log entry.
+    """Append ONE concise log line for a step status transition.
 
     `label` is the step's human-readable description — the canonical
-    identity for everything (table rows, resume matching). The special
-    label "final" marks overall pipeline completion.
+    identity for everything (table rows). The special label "final" marks
+    overall pipeline completion. The full step-overview table is NOT
+    rendered here on every call (that used to make every single step
+    transition append a whole box-drawn table) — it's only rendered at
+    real stopping points: pipeline end (success or failure) via this
+    function, or once at the start of a resume via render_status_table()
+    called explicitly from automation_raman_analysis.py.
     """
     now_ts = time.time()
-    now_str = fmt_time(now_ts)
 
     if label not in STEP_HISTORY:
         STEP_HISTORY[label] = {"start_ts": now_ts}
-
     STEP_HISTORY[label]["end_ts"] = now_ts
     STEP_HISTORY[label]["status"] = status
     if message:
         STEP_HISTORY[label]["message"] = message
 
+    h = STEP_HISTORY[label]
+    dur = calc_duration(h["start_ts"], h["end_ts"]) if status in ("completed", "failed") else ""
+    total = len(EXPECTED_LABELS) if EXPECTED_LABELS else 0
+    if label == "final":
+        pos = "done"
+    else:
+        num = _step_number(label)
+        pos = f"{num}/{total}" if total else str(num)
+    dur_str = f"  ({dur})" if dur else ""
+    msg_str = f" — {message}" if message else ""
+    line = f"{fmt_time(now_ts)}  [{pos}] {_icon(status)} {status.upper():<9} {label}{dur_str}{msg_str}"
+
+    # completed/failed are the delineating events worth spotting at a glance;
+    # "running" stays a single plain line to keep the common case concise.
+    text = _boxed(line) if status in ("completed", "failed") else line
+
+    try:
+        with open(status_file, "a") as f:
+            f.write(text + "\n")
+    except Exception as e:
+        print(f"[status] Warning: Could not write status file: {e}")
+
+    # Natural stopping points only: pipeline-ending failure, or final success.
+    if status == "failed" or (status == "completed" and label == "final"):
+        render_status_table(status_file, material_name)
+
+
+# ── Full status table — called only at start-of-resume or pipeline end ─────
+def render_status_table(status_file, material_name):
+    """Append the full box-drawn step-overview table to *status_file*.
+
+    Not called on every step transition (see write_status) — only:
+      * once at the start of a run, if resuming (some steps already done)
+      * at the end of the run (pipeline success or a fatal step failure)
+    """
+    now_ts = time.time()
+    now_str = fmt_time(now_ts)
+
     any_failed = any(h.get("status") == "failed" for h in STEP_HISTORY.values())
-    if status == "failed" or any_failed:
+    final_done = STEP_HISTORY.get("final", {}).get("status") == "completed"
+    if any_failed:
         overall_status = "FAILED"
-    elif status == "completed" and label == "final":
+    elif final_done:
         overall_status = "COMPLETED"
     else:
         overall_status = "RUNNING"
 
-    first_label = EXPECTED_LABELS[0] if EXPECTED_LABELS else label
-    pipeline_start = STEP_HISTORY.get(first_label, {}).get("start_ts", now_ts)
+    first_label = EXPECTED_LABELS[0] if EXPECTED_LABELS else None
+    pipeline_start = STEP_HISTORY.get(first_label, {}).get("start_ts", now_ts) if first_label else now_ts
 
     def _dur(s, e):
         return calc_duration(s, e) if s and e else ""
 
-    def _icon(sts):
-        return {"completed": "✓", "running": "▶",
-                "failed": "✗"}.get(sts, "—")
-
     running_label = None
+    failed_label = None
     for k, h in STEP_HISTORY.items():
         if h.get("status") == "running" and k != "final":
             running_label = k
+        if h.get("status") == "failed" and k != "final":
+            failed_label = k
 
     lines = []
     lines.append("")
     lines.append("━" * 78)
-    header = f"  RAMAN WORKFLOW  │  {material_name}  │  {now_str}"
-    lines.append(header)
+    lines.append(f"  RAMAN WORKFLOW  │  {material_name}  │  {now_str}")
     lines.append("━" * 78)
     lines.append("")
 
@@ -172,8 +228,9 @@ def write_status(label, status, message="", *,
     summary_parts = [f"Status   {overall_status}"]
     if running_label is not None:
         summary_parts.append(f"— Step {_step_number(running_label)} ({running_label})")
-    if overall_status == "FAILED" and message:
-        summary_parts.append(f"— {message}")
+    if overall_status == "FAILED" and failed_label is not None:
+        msg = STEP_HISTORY.get(failed_label, {}).get("message", "")
+        summary_parts.append(f"— {failed_label}" + (f": {msg}" if msg else ""))
     lines.append(f"  {'  '.join(summary_parts)}")
     lines.append(f"  Started  {fmt_time(pipeline_start)}")
     lines.append(f"  Elapsed  {elapsed}")
@@ -194,29 +251,21 @@ def write_status(label, status, message="", *,
     def _fmt_row(cols):
         parts = []
         for i, (c, w) in enumerate(zip(cols, col_widths)):
-            if i == 0:
+            if i in (0, 4):
                 parts.append(f"{c:>{w}}")
             elif i == 1:
                 parts.append(f" {c} ")
-            elif i == 2:
-                parts.append(f"{c:<{w}}")
-            elif i == 3:
-                parts.append(f"{c:<{w}}")
             else:
-                parts.append(f"{c:>{w}}")
+                parts.append(f"{c:<{w}}")
         return "│ " + " │ ".join(parts) + " │"
 
     lines.append("  ┌" + sep_line + "┐")
     lines.append("  " + _fmt_row(["#", "", "Status", "Description", "Duration"]))
     lines.append("  │" + sep_line + "│")
-
     for num, icon, sts_text, desc, dur in rows:
         lines.append("  " + _fmt_row([num, icon, sts_text, desc, dur]))
-
     lines.append("  └" + sep_line + "┘")
     lines.append("")
-    lines.append("━" * 78)
-    lines.append("  STEP LOG")
     lines.append("━" * 78)
     lines.append("")
 
@@ -224,7 +273,7 @@ def write_status(label, status, message="", *,
         with open(status_file, "a") as f:
             f.write("\n".join(lines) + "\n")
     except Exception as e:
-        print(f"[status] Warning: Could not write status file: {e}")
+        print(f"[status] Warning: Could not write status table: {e}")
 
 
 def make_write_status(status_file, material_label, material_name, base_project_dir):
@@ -240,91 +289,10 @@ def make_write_status(status_file, material_label, material_name, base_project_d
     return _inner
 
 
-# ── Resume parser ──────────────────────────────────────────────────────────
-def parse_resume_step(status_file, step_history, expected_labels):
-    """Parse the last status table in workflow.log to determine the resume label.
-
-    Matching is done purely against the Description column text — the
-    leading step-number column is cosmetic and intentionally ignored, so
-    table re-numbering across code changes never breaks resume. Returns the
-    label to resume at, or None if every label in `expected_labels` is
-    COMPLETED.
-    """
-    if not expected_labels:
-        raise ValueError("parse_resume_step: expected_labels must be non-empty")
-
-    if not os.path.exists(status_file):
-        print(f"[resume] No existing status file at {status_file}. "
-              f"Starting from \"{expected_labels[0]}\".")
-        return expected_labels[0]
-
-    try:
-        with open(status_file) as f:
-            content = f.read()
-
-        table_starts = [i for i, c in enumerate(content) if c == '┌']
-        if not table_starts:
-            print(f"[resume] No status table found in {status_file}. "
-                  f"Starting from \"{expected_labels[0]}\".")
-            return expected_labels[0]
-
-        last_table_start = table_starts[-1]
-        table_end = content.find('└', last_table_start)
-        if table_end == -1:
-            table_end = len(content)
-
-        table_section = content[last_table_start:table_end]
-
-        completed_labels = set()
-        running_label = None
-        failed_label = None
-
-        for line in table_section.split('\n'):
-            line = line.strip()
-            if not line.startswith('│'):
-                continue
-            parts = [p.strip() for p in line.split('│')]
-            if len(parts) < 5:
-                continue
-            label_text = parts[4].strip()
-            status_text = parts[3].strip().upper()
-            if not label_text or label_text == "Description":
-                continue  # header row
-
-            if status_text == "COMPLETED":
-                completed_labels.add(label_text)
-                step_history[label_text] = {
-                    "status": "completed",
-                    "start_ts": 0, "end_ts": 0,
-                    "message": "Resumed — completed in previous run",
-                }
-            elif status_text == "RUNNING":
-                running_label = label_text
-            elif status_text == "FAILED":
-                failed_label = label_text
-
-        if running_label is not None:
-            step_history[running_label] = {
-                "status": "running", "start_ts": 0, "end_ts": 0,
-                "message": "Interrupted — was RUNNING",
-            }
-            print(f"[resume] \"{running_label}\" was ACTIVE (likely crashed). "
-                  f"Retrying from there.")
-            return running_label
-
-        if failed_label is not None:
-            print(f"[resume] \"{failed_label}\" had FAILED. Retrying from there.")
-            return failed_label
-
-        for label in expected_labels:
-            if label not in completed_labels:
-                print(f"[resume] Continuing from \"{label}\".")
-                return label
-
-        print("[resume] All steps already completed. Nothing to do.")
-        return None
-
-    except Exception as e:
-        print(f"[resume] Warning: Could not parse {status_file}: {e}")
-        print(f"[resume] Starting from \"{expected_labels[0]}\" (full pipeline).")
-        return expected_labels[0]
+# NOTE: resume is entirely file-based (each step's is_complete(work_dir, config)
+# checks real VASP output files — see _step_is_done() in
+# automation_raman_analysis.py). workflow.log is written for human monitoring
+# only and is never parsed to decide what to resume. A previous version of
+# this module had a parse_resume_step() that re-derived resume state from the
+# log table; it was dead code (never called) and has been removed so nothing
+# here even suggests the log is a source of truth for resume.

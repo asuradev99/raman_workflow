@@ -61,10 +61,15 @@ def is_complete(work_dir, config):
 
 
 def restart(work_dir, config):
-    """Remove phonopy postprocessing outputs from hf/."""
+    """Remove phonopy postprocessing outputs from hf/.
+
+    NOTE: phonopy_disp.yaml is deliberately NOT removed — it is created by
+    `phonopy -d` in the supercell/hf_setup step and `phonopy -f` (this step)
+    requires it as input.
+    """
     hf_dir = os.path.join(work_dir, "hf")
     for f in ("band.yaml", "irreps.yaml", "mesh.yaml", "phonopy.yaml",
-              "phonopy_disp.yaml", "eigenvectors.yaml", "eigenvectors.conf"):
+              "eigenvectors.yaml", "eigenvectors.conf"):
         restart_rm(os.path.join(hf_dir, f))
     for p in glob.glob(os.path.join(hf_dir, "band*.png")):
         restart_rm(p)

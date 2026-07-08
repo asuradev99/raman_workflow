@@ -7,10 +7,11 @@ import subprocess
 import time
 
 from .vasp import check_vasp_convergence, _has_zbrent_error, _extract_max_force
+from .slurm import write_standalone_script, build_srun_cmd
 
 
 def run_relaxation(scf_dir, srun_args, vasp_binary, stage_label="",
-                   max_attempts=3, stall_poll_s=900, setup_cmd=""):
+                   max_attempts=3, stall_poll_s=900, setup_cmd="", system_paths=None):
     """Run VASP relaxation, self-healing stalls and retrying on ZBRENT crashes.
 
     Each attempt:
@@ -33,7 +34,7 @@ def run_relaxation(scf_dir, srun_args, vasp_binary, stage_label="",
     poscar_path = os.path.join(scf_dir, "POSCAR")
     watch_path = os.path.join(scf_dir, "OSZICAR")
     _prefix = f"{setup_cmd} && " if setup_cmd else ""
-    cmd = f"{_prefix}srun {srun_args} {vasp_binary} > relaxation.stdout"
+    cmd = f"{_prefix}{build_srun_cmd(srun_args, vasp_binary, '> relaxation.stdout')}"
 
     def _mtime():
         return os.path.getmtime(watch_path) if os.path.exists(watch_path) else None
@@ -43,6 +44,7 @@ def run_relaxation(scf_dir, srun_args, vasp_binary, stage_label="",
             os.remove(outcar_path)
 
         print(f"\n  [relax] Attempt {attempt}/{max_attempts}...")
+        write_standalone_script(scf_dir, cmd, system_paths)
 
         # ── Inner loop: run srun, restart on stall ────────────────────────────
         while True:

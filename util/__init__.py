@@ -18,7 +18,7 @@ from .config import load_config, merge_config, get_srun_args, split_srun_args, v
 from .symlinks import update_hf_symlinks, update_raman_symlinks
 from .status import (
     STEP_HISTORY, EXPECTED_LABELS,
-    write_status, make_write_status, parse_resume_step,
+    write_status, make_write_status, render_status_table,
     print_step_header, print_step_result, begin_step, finish_dispatch_step,
     set_expected_labels, relax_labels,
     RELAX_LABEL_SINGLE, RELAX_LABEL_DEFECT_1, RELAX_LABEL_DEFECT_2,

@@ -176,7 +176,7 @@ def restart_rm(path):
 
 _VASP_OUTPUT_FILES = (
     "OUTCAR", "vasprun.xml", "OSZICAR", "DOSCAR", "EIGENVAL",
-    "IBZKPT", "CHG", "CHGCAR", "WAVECAR", "relaxation.stdout",
+    "IBZKPT", "CHG", "CHGCAR", "WAVECAR", "relaxation.stdout", "CONTCAR",
 )
 
 

@@ -10,6 +10,7 @@ from util.vasp import (
     is_calculation_complete,
 )
 from util.status import begin_step, print_step_result
+from util.slurm import write_standalone_script, build_srun_cmd
 
 
 def run(ctx):
@@ -36,11 +37,9 @@ def run(ctx):
         write_vasp_inputs(gs_dir, work_dir, ctx.config, "supercell",
                           ctx.sup_relax_kpoints_mesh, ctx.sup_relax_kpoints_shift,
                           "K-points for supercell")
-        run_command(
-            f"srun {ctx.srun_args} {ctx.vasp_binary} > supercell_relax.stdout",
-            cwd=gs_dir,
-            check_success=False,
-        )
+        _cmd = build_srun_cmd(ctx.srun_args, ctx.vasp_binary, "> supercell_relax.stdout")
+        write_standalone_script(gs_dir, _cmd, ctx.system_paths)
+        run_command(_cmd, cwd=gs_dir, check_success=False)
         check_vasp_convergence(gs_dir, "step-2")
         n = count_ionic_steps(gs_dir)
         if n and n >= 100:

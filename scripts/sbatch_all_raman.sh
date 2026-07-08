@@ -20,10 +20,10 @@ set -euo pipefail
 RAMAN_DIR="${RAMAN_DIR:?RAMAN_DIR must be set (exported by pipeline via --export)}"
 VASP="${VASP_BINARY:-/global/cfs/cdirs/m526/liangbo/bin/gpu/vasp_std}"
 
-source ~/.bashrc 2>/dev/null || true
-if [ -n "${CONDA_INIT:-}" ]; then source "$CONDA_INIT" 2>/dev/null; fi
-if [ -n "${CONDA_ENV:-}" ]; then conda activate "$CONDA_ENV" 2>/dev/null; fi
-if [ -n "${VASP_MODULES:-}" ]; then module load $VASP_MODULES 2>/dev/null; fi
+source ~/.bashrc || true
+if [ -n "${CONDA_INIT:-}" ]; then source "$CONDA_INIT"; fi
+if [ -n "${CONDA_ENV:-}" ]; then conda activate "$CONDA_ENV"; fi
+if [ -n "${VASP_MODULES:-}" ]; then module load $VASP_MODULES; fi
 
 echo "=== sbatch_all_raman: $RAMAN_DIR ==="
 cd "$RAMAN_DIR" || exit 1

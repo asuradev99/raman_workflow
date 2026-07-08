@@ -9,9 +9,8 @@ import os
 import re
 import subprocess
 
-from .slurm import build_bash_setup, run_via_salloc_pipe, submit_many, submit_sbatch_wrapper
+from .slurm import build_bash_setup, run_via_salloc_pipe, submit_many, submit_sbatch_wrapper, write_standalone_script, build_srun_cmd
 from .vasp import is_calculation_complete
-from .status import parse_resume_step, STEP_HISTORY
 
 
 # ── Serial VASP wrapper (bash template) ──────────────────────────────────────
@@ -93,7 +92,7 @@ def run_serial_in_salloc_with_retry(directories, wrapper_template,
 
 def run_dirs_in_parallel_batches(directories, vasp_binary, srun_args,
                                  gpus_per_dir=4, total_gpus=None,
-                                 log_name="relaxation.stdout"):
+                                 log_name="relaxation.stdout", system_paths=None):
     """Run VASP in *directories* concurrently within an existing allocation.
 
     Used by ``sbatch_mix`` mode (one big sbatch allocation, no per-directory
@@ -148,6 +147,8 @@ def run_dirs_in_parallel_batches(directories, vasp_binary, srun_args,
           f"({gpus_per_dir} GPUs/dir, {total_gpus} GPUs total) — "
           f"{n_batches} batch(es)")
 
+    cmd = build_srun_cmd(srun_args, vasp_binary, f"> {log_name} 2>&1")
+
     for batch_num, start in enumerate(range(0, len(todo), concurrency), start=1):
         batch = todo[start:start + concurrency]
         print(f"  [sbatch_mix] Batch {batch_num}/{n_batches}: "
@@ -155,7 +156,7 @@ def run_dirs_in_parallel_batches(directories, vasp_binary, srun_args,
         procs = []
         for d in batch:
             dirname = os.path.basename(d)
-            cmd = f"srun {srun_args} {vasp_binary} > {log_name} 2>&1"
+            write_standalone_script(d, cmd, system_paths)
             procs.append((dirname, subprocess.Popen(cmd, shell=True, cwd=d)))
         for dirname, proc in procs:
             rc = proc.wait()
@@ -252,7 +253,7 @@ def dispatch_vasp_runs(ctx, all_dirs, todo, *, job_prefix, dir_script_name,
             run_dirs_in_parallel_batches(
                 incomplete, ctx.vasp_binary, ctx.vasp_srun_per_dir,
                 gpus_per_dir=ctx.vasp_gpus_per_dir, total_gpus=total_gpus,
-                log_name=mix_log_name,
+                log_name=mix_log_name, system_paths=ctx.system_paths,
             )
             # re-checked via is_calculation_complete at the top of the next iteration
         return ok

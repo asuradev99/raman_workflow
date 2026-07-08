@@ -7,15 +7,19 @@ import sys
 def generate_phonon_visuals(hf_dir, ctx):
     """Generate VESTA/VMD phonon mode files from band.yaml after postprocessing.
 
-    Loads SpectroPy's visualize_modes.py from system_paths.spectroPy_dir,
-    symlinks template.vesta from $RAMAN_PROJECT_DIR into hf_dir, then
-    writes per-mode files to hf_dir/VESTA_MODES/ and/or hf_dir/VMD_MODES/.
-    Failures are non-fatal — a warning is printed and the pipeline continues.
+    Loads SpectroPy's visualize_modes.py from system_paths.spectroPy_dir, reads
+    the material's input/template.vesta, then writes per-mode files to
+    hf_dir/VESTA_MODES/ and/or hf_dir/VMD_MODES/.
+
+    Visualization is best-effort and never fatal: any failure — a missing
+    template.vesta, a missing/unreadable band.yaml, or SpectroPy calling
+    sys.exit() (which raises SystemExit) — is caught here, logged as a warning,
+    and the pipeline continues. Only KeyboardInterrupt is allowed to propagate.
     """
     try:
         _run(hf_dir, ctx)
-    except Exception as e:
-        print(f"  [viz] WARNING: visualization failed ({e}) — skipping, pipeline continues")
+    except (Exception, SystemExit) as e:
+        print(f"  [viz] WARNING: visualization failed ({e!r}) — skipping, pipeline continues")
 
 
 def _run(hf_dir, ctx):
@@ -42,22 +46,19 @@ def _run(hf_dir, ctx):
     write_vesta     = output_format in ("vesta", "both")
     write_vmd_flag  = output_format in ("vmd", "both")
 
-    # ── Symlink template.vesta from project root into hf_dir ─────────────────
+    # ── Read template.vesta from the material's own input/ directory ─────────
+    # Each material carries its own template (matching its supercell, so the
+    # per-site colours/bonds in SITET are correct). The STRUC/CELLP geometry is
+    # regenerated from the real structure by write_vesta_file.
     vesta_template_content = ""
     if write_vesta:
-        project_dir  = os.environ.get("RAMAN_PROJECT_DIR", "")
-        template_src = os.path.join(project_dir, template_name) if project_dir else ""
-        template_dst = os.path.join(hf_dir, template_name)
-
-        if not os.path.exists(template_dst) and template_src and os.path.exists(template_src):
-            os.symlink(template_src, template_dst)
-            print(f"  [viz] Symlinked {template_name} → {template_src}")
-
-        if os.path.exists(template_dst):
-            with open(template_dst) as f:
+        template_src = os.path.join(ctx.material_dir, "input", template_name)
+        if os.path.exists(template_src):
+            with open(template_src) as f:
                 vesta_template_content = f.read()
         else:
-            print(f"  [viz] WARNING: template '{template_name}' not found in hf_dir or project root — skipping VESTA output")
+            print(f"  [viz] WARNING: template '{template_name}' not found in "
+                  f"{ctx.material_dir}/input/ — skipping VESTA output")
             write_vesta = False
 
     # ── Read structure + phonon data ──────────────────────────────────────────
@@ -88,7 +89,8 @@ def _run(hf_dir, ctx):
             fname = os.path.join(hf_dir, "VESTA_MODES",
                                  f"mode_{i+1:03d}_({freq_cm1:.1f}cm-1).vesta")
             write_vesta_file(fname, vesta_template_content,
-                             eigendisps[i], n_atoms, vesta_scale, freq_cm1)
+                             eigendisps[i], n_atoms, vesta_scale, freq_cm1,
+                             structure=structure)
 
         if write_vmd_flag:
             fname = os.path.join(hf_dir, "VMD_MODES", f"mode_{i+1:03d}.vmd")

@@ -9,12 +9,16 @@
 #     bash raman_workflow/scripts/share_material.sh hBN_defect_test
 #
 #  What it does:
-#     1. Copies the material's scf/ and input/ from pscratch to:
-#          /global/cfs/cdirs/m526/liangbo/<material_dir>/
-#     2. Excludes huge CHG and *.h5 files
-#     3. Symlinks CHGCAR and WAVECAR to save CFS quota
-#     4. Copies workflow.log and workflow.out
-#     5. Sets group = m526, group read-only, no world permissions
+#     1. Requests a small interactive allocation (faster path to CFS than the
+#        shared login node) and re-execs itself inside it via srun.
+#     2. Directly rsyncs the ENTIRE material folder from pscratch to CFS,
+#        excluding only WAVECAR, WAVEDER, and *.h5. No intermediate archive.
+#     3. --copy-unsafe-links dereferences the input/ symlink (it points
+#        outside the material tree, at $HOME) while preserving the internal
+#        relative ra_pos_*/CHGCAR -> ../../scf/CHGCAR symlinks (they resolve
+#        inside the copied tree, so rsync keeps them as links -- no 966x
+#        duplication of CHGCAR).
+#     4. Sets group = m526, group read-only, no world permissions.
 # =============================================================================
 
 set -uo pipefail
@@ -26,6 +30,15 @@ DST="/global/cfs/cdirs/m526/liangbo/${MATERIAL}"
 if [ ! -d "$SRC" ]; then
     echo "ERROR: source not found: $SRC"
     exit 1
+fi
+
+# Re-exec inside a small interactive allocation for faster I/O to CFS than the
+# login node gives. "${2:-}" is set on the re-exec below to skip this the
+# second time through (once already inside the allocation).
+if [[ "${2:-}" != "--inside-salloc" ]]; then
+    echo "=== Requesting interactive allocation for the transfer ==="
+    exec salloc -N 1 -C cpu -t 00:30:00 --qos=interactive -A m526 \
+        srun --ntasks=1 --nodes=1 bash "$0" "$MATERIAL" --inside-salloc
 fi
 
 echo "=== Copying ${MATERIAL} ==="
@@ -43,59 +56,11 @@ _fix_permissions() {
 }
 trap _fix_permissions EXIT
 
-# Copy all subdirectories — exclude CHG (~1 GB), HDF5, big binary files, and vasprun.xml
-RSYNC=(rsync -a --info=progress2
-    --exclude=CHG --exclude='*.h5' --exclude=CHGCAR --exclude=WAVECAR
-    --exclude=vasprun.xml --exclude='*.vesta'
-)
-for sub in $(ls "$SRC"); do
-    src_sub="${SRC}/${sub}"
-    if [ ! -d "$src_sub" ] || [ "$sub" = "." ] || [ "$sub" = ".." ]; then
-        continue
-    fi
-
-    if [ "$sub" = "raman" ]; then
-        # Copy raman/ metadata but skip all ra_pos_* dirs
-        "${RSYNC[@]}" --exclude='ra_pos_*/' "${src_sub}/" "${DST}/${sub}/" || true
-        # Copy only the first ra_pos_* directory as a sample
-        first_rapos=$(ls -d "${src_sub}"/ra_pos_* 2>/dev/null | sort | head -1)
-        if [ -n "$first_rapos" ]; then
-            rapos_name=$(basename "$first_rapos")
-            echo "  raman: copying sample dir ${rapos_name} (1 of $(ls -d "${src_sub}"/ra_pos_* 2>/dev/null | wc -l))"
-            "${RSYNC[@]}" "${first_rapos}/" "${DST}/${sub}/${rapos_name}/" || true
-        fi
-    else
-        "${RSYNC[@]}" "${src_sub}/" "${DST}/${sub}/" || true
-    fi
-done
-
-# Symlink CHGCAR and WAVECAR from pscratch (save CFS quota, show 0-byte evidence)
-for sub in $(ls "$SRC"); do
-    for bigfile in CHGCAR WAVECAR; do
-        src_file="${SRC}/${sub}/${bigfile}"
-        dst_file="${DST}/${sub}/${bigfile}"
-        if [ -f "$src_file" ]; then
-            mkdir -p "$(dirname "$dst_file")"
-            ln -sf "$src_file" "$dst_file"
-            echo "  symlink: $dst_file -> $src_file"
-        fi
-    done
-done
-
-# Copy workflow.log and workflow.out (now live in pscratch)
-for log in workflow.log workflow.out; do
-    if [ -f "${SRC}/${log}" ]; then
-        cp "${SRC}/${log}" "${DST}/"
-    fi
-done
+echo "=== Copying entire folder: ${MATERIAL} (excluding WAVECAR, WAVEDER, *.h5) ==="
+rsync -a --copy-unsafe-links --info=progress2 \
+    --exclude='WAVECAR' --exclude='WAVEDER' --exclude='*.h5' \
+    "${SRC}/" "${DST}/"
 
 echo ""
-echo "=== Done: ${DST} ==="
-ls -la "$DST/"
-echo ""
-echo "=== contents ==="
-for sub in $(ls "$DST"); do
-    if [ -d "${DST}/${sub}" ]; then
-        echo "  ${sub}/: $(ls "${DST}/${sub}" | wc -l) files"
-    fi
-done
+echo "=== Done: ${DST}/ ==="
+du -sh "$DST"

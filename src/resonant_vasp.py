@@ -27,7 +27,8 @@ def run(ctx):
         return run_vasp_in_dirs(todo, ctx.srun_args, ctx.vasp_binary,
                                 max_restarts=ctx.vasp_max_restarts,
                                 cpu_flag=ctx.cpu_flag,
-                                log_name="stdout")
+                                log_name="stdout",
+                                system_paths=ctx.system_paths)
 
     ok = dispatch_vasp_runs(
         ctx, ra_dirs, todo,

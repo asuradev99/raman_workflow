@@ -124,8 +124,12 @@ def _run_direct(*pipeline_flags):
     return result.returncode
 
 
-def _is_complete():
-    """Return True if every pipeline step's output files are present."""
+def _is_complete(exclude=()):
+    """Return True if every pipeline step's output files are present.
+
+    ``exclude`` is a set/tuple of step names to skip — used to check whether the
+    VASP-heavy steps are done independently of post_process (which runs on login).
+    """
     import yaml
     from src import PIPELINE, STEP_REGISTRY
     with open(CONFIG_PATH) as _f:
@@ -136,6 +140,8 @@ def _is_complete():
     else:
         steps = PIPELINE
     for step in steps:
+        if step.name in exclude:
+            continue
         if step._is_complete is None:
             return False
         try:
@@ -144,6 +150,37 @@ def _is_complete():
         except Exception:
             return False
     return True
+
+
+def _has_post_process_step():
+    """True if post_process is one of this material's configured steps."""
+    import yaml
+    with open(CONFIG_PATH) as _f:
+        _raw = yaml.safe_load(_f) or {}
+    names = list(_raw.get("steps", {}).keys())
+    return ("post_process" in names) if names else True
+
+
+def _default_post_salloc(base):
+    """Derive a tiny interactive-queue salloc from the Phase 2 sbatch args.
+
+    post_process is serial and cheap, so it runs in a 1-node, 30-minute
+    interactive allocation instead of holding the big Phase 2 node count.
+    Constraint (-C/--constraint) and account (-A) are inherited from *base*;
+    node count, walltime, and QOS are forced to the small interactive values.
+    Overridable per material via ``compute_modes.<mode>.salloc_post``.
+    """
+    import re
+    s = base
+    s = re.sub(r'--nodes[=\s]+\d+', '--nodes=1', s)
+    s = re.sub(r'(^|\s)-N\s+\d+', r'\g<1>-N 1', s)
+    s = re.sub(r'--time[=\s]+\S+', '--time=00:30:00', s)
+    s = re.sub(r'(^|\s)-t\s+\S+', r'\g<1>-t 00:30:00', s)
+    if re.search(r'--qos[=\s]+\S+', s):
+        s = re.sub(r'--qos[=\s]+\S+', '--qos=interactive', s)
+    else:
+        s += ' --qos=interactive'
+    return s.strip()
 
 
 def _are_relax_steps_done():
@@ -187,6 +224,7 @@ elif compute_mode == "interactive_serial":
             salloc_args=salloc_args,
             job_name=f"raman_{MATERIAL_NAME}",
             work_dir=work_dir,
+            log_path=STATUS_FILE,
         )
     except SallocAllocationError as e:
         print(f"[provision] Allocation rejected by Slurm: {e}")
@@ -214,6 +252,7 @@ elif compute_mode in ("sbatch_parallel", "sbatch"):
             salloc_args=salloc_args,
             job_name=f"raman_{MATERIAL_NAME}",
             work_dir=work_dir,
+            log_path=STATUS_FILE,
         )
     except subprocess.CalledProcessError:
         pass
@@ -243,6 +282,7 @@ elif compute_mode in ("sbatch_serial", "sbatch_mix"):
                 job_name=f"relax_{MATERIAL_NAME}",
                 output_dir=work_dir,
                 sbatch_args=sbatch_relax_args,
+                log_path=STATUS_FILE,
             )
         except SbatchCancelledError as e:
             print(f"[provision] {e}")
@@ -251,20 +291,47 @@ elif compute_mode in ("sbatch_serial", "sbatch_mix"):
             print(f"[provision] Phase 1 sbatch failed.")
             sys.exit(1)
 
-    print(f"[provision] Phase 2 — main pipeline sbatch ({sbatch_args})")
-    try:
-        ok = submit_sbatch_wrapper(
-            _salloc_wrapper("--inside-salloc"),
-            job_name=f"raman_{MATERIAL_NAME}",
-            output_dir=work_dir,
-            sbatch_args=sbatch_args,
-        )
-    except SbatchCancelledError as e:
-        print(f"[provision] {e}")
-        sys.exit(1)  # fatal — user explicitly cancelled, do not retry
-    if not ok:
-        print(f"[provision] sbatch submission or execution failed.")
-        sys.exit(1)
+    # Phase 2 runs the VASP-heavy steps but NOT post_process (--no-post-process):
+    # post_process is serial and would otherwise idle the whole node allocation.
+    # Skipped entirely if the VASP steps are already done (e.g. on a resume that
+    # only needs Phase 3), so a resume never re-allocates the big node count.
+    if not _is_complete(exclude=("post_process",)):
+        print(f"[provision] Phase 2 — main pipeline sbatch ({sbatch_args})")
+        try:
+            ok = submit_sbatch_wrapper(
+                _salloc_wrapper("--inside-salloc", "--no-post-process"),
+                job_name=f"raman_{MATERIAL_NAME}",
+                output_dir=work_dir,
+                sbatch_args=sbatch_args,
+                log_path=STATUS_FILE,
+            )
+        except SbatchCancelledError as e:
+            print(f"[provision] {e}")
+            sys.exit(1)  # fatal — user explicitly cancelled, do not retry
+        if not ok:
+            print(f"[provision] sbatch submission or execution failed.")
+            sys.exit(1)
+
+    # Phase 3 — post_process in a tiny interactive-queue allocation (1 node,
+    # 30 min by default; override with compute_modes.<mode>.salloc_post). Only
+    # run once the VASP-heavy steps are complete; otherwise fall through to the
+    # exit-42 retry so Phase 2 is resumed instead of post-processing early.
+    if _has_post_process_step() and _is_complete(exclude=("post_process",)):
+        salloc_post = cm_cfg.get("salloc_post") or _default_post_salloc(sbatch_args)
+        print(f"[provision] Phase 3 — post_process in interactive salloc ({salloc_post})")
+        try:
+            run_via_salloc_pipe(
+                _salloc_wrapper("--only-post-process"),
+                salloc_args=salloc_post,
+                job_name=f"post_{MATERIAL_NAME}",
+                work_dir=work_dir,
+                log_path=STATUS_FILE,
+            )
+        except SallocAllocationError as e:
+            print(f"[provision] post_process allocation rejected: {e}")
+            sys.exit(42)  # retry — resume will skip straight back to Phase 3
+        except subprocess.CalledProcessError:
+            pass  # walltime/preempt — final _is_complete() check decides 0 vs 42
     sys.exit(0 if _is_complete() else 42)
 
 else:

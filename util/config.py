@@ -44,18 +44,15 @@ def load_config(paths):
     return config
 
 
-def get_srun_args(config, mode, key="srun_relax", cpu_flag=False):
+def get_srun_args(config, mode, key="srun_relax"):
     """Get srun args from ``compute_modes.<mode>.<key>`` in the config.
 
-    When ``cpu_flag`` is True, reads ``compute_modes.<mode>.srun_cpu_relax``
-    so args match the node count for the active compute mode.
-    Raises KeyError if the mode/key combination is missing.
+    Always reads ``compute_modes.<mode>.<key>`` (``srun_relax`` by default) --
+    for a CPU run, put the CPU srun arguments there. Raises KeyError if the
+    mode/key combination is missing or empty; there is no implicit default.
     """
     modes = config.get("compute_modes", {})
     mode_cfg = modes.get(mode, {})
-    if cpu_flag:
-        args = mode_cfg.get("srun_cpu_relax", "")
-        return args or "--cpu_bind=cores --ntasks 32 --cpus-per-task 4"
     args = mode_cfg.get(key, "")
     if args:
         return args

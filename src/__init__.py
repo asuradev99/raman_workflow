@@ -9,6 +9,7 @@ from . import (
     phonon_post, raman_prep, resonant_vasp, post_process,
 )
 from util.status import relax_labels, RELAX_LABEL_DEFECT_2_CPU
+from util.slurm import build_omp_prefix
 
 # Steps that must complete before per-directory parallel dispatch begins.
 # In sbatch_parallel these run inside a salloc; in sbatch_mix they run in
@@ -227,11 +228,28 @@ class PipelineContext:
         self.cpu_relax_vasp_binary = _cr.get("vasp_binary", "")
         _parts = []
         if _cr.get("vasp_modules"):
-            _parts.append(f"module load {_cr['vasp_modules']} 2>/dev/null")
+            _parts.append(f"module load {_cr['vasp_modules']}")
         _omp = _cr.get("omp_env", {})
         for k, v in _omp.items():
             _parts.append(f"export {k}={v}")
         self.cpu_relax_setup_cmd = " && ".join(_parts) if _parts else ""
+
+        # CPU runs: bake "export OMP_NUM_THREADS=... && ... && srun" straight
+        # into srun_args/vasp_srun_per_dir here, once -- every VASP-launching
+        # call site downstream just uses ctx.srun_args as it always did, with
+        # no new parameter anywhere. See build_srun_cmd for why the exports
+        # go ahead of srun instead of via --export=ALL,VAR=value.
+        # cpu.omp.enabled: false opts a material out entirely (e.g. to
+        # compare OpenMP vs. pure-MPI/NPAR-only timing) -- defaults to True
+        # so every other CPU material is unaffected.
+        _cpu_cfg = cfg.get("cpu", {})
+        if self.cpu_flag and _cpu_cfg.get("omp", {}).get("enabled", True):
+            _omp_prefix = build_omp_prefix(_cpu_cfg.get("omp", {}))
+            if _omp_prefix:
+                self.srun_args = f"{_omp_prefix} && srun {self.srun_args}"
+                if self.vasp_srun_per_dir:
+                    self.vasp_srun_per_dir = f"{_omp_prefix} && srun {self.vasp_srun_per_dir}"
+
         _phonon_post = cfg.get("steps", {}).get("phonon_post", {})
         _eigvec = _phonon_post.get("eigenvectors_band", {})
         self.eigvec_band_path   = _eigvec.get("path", "0.0 0.0 0.0  0.0 0.0 0.0")

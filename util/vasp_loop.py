@@ -12,6 +12,7 @@ import subprocess
 from .io import run_command
 from .vasp import is_calculation_complete
 from .config import split_srun_args
+from .slurm import write_standalone_script, build_srun_cmd
 
 
 HF_DIR_PREFIX = "hf_POSCAR-"
@@ -38,7 +39,7 @@ def list_hf_dirs(hffiles_dir, include_groundstate=False):
 
 def run_vasp_in_dirs(dirs, srun_args, vasp_binary, *,
                      max_restarts=3, hf_parallel=False, cpu_flag=False,
-                     log_name="relaxation.stdout"):
+                     log_name="relaxation.stdout", system_paths=None):
     """Run VASP in *dirs* (absolute paths) with retry and optional parallel execution.
 
     Re-checks ``is_calculation_complete`` at the start of each attempt and only
@@ -54,6 +55,8 @@ def run_vasp_in_dirs(dirs, srun_args, vasp_binary, *,
         hf_parallel:   Run all dirs concurrently with split srun args.
         cpu_flag:      Serial CPU mode (overrides hf_parallel).
         log_name:      Filename for VASP stdout within each dir.
+        system_paths:  For the per-directory standalone-reproduction script
+                       (module loads / conda activate) written into each dir.
     """
     for attempt in range(1, max_restarts + 1):
         todo = [d for d in dirs if not is_calculation_complete(d)]
@@ -66,37 +69,39 @@ def run_vasp_in_dirs(dirs, srun_args, vasp_binary, *,
             print(f"  [vasp] Attempt {attempt}/{max_restarts}: "
                   f"{len(todo)} dir(s)...")
         if hf_parallel and not cpu_flag:
-            _run_hf_parallel(todo, srun_args, vasp_binary, log_name=log_name)
+            _run_hf_parallel(todo, srun_args, vasp_binary, log_name=log_name, system_paths=system_paths)
         else:
-            _run_serial(todo, srun_args, vasp_binary, log_name=log_name)
+            _run_serial(todo, srun_args, vasp_binary, log_name=log_name, system_paths=system_paths)
     return all(is_calculation_complete(d) for d in dirs)
 
 
 # ── Internal runners (accept absolute paths) ────────────────────────────────
 
-def _run_serial(dirs, srun_args, vasp_binary, log_name="relaxation.stdout"):
+def _run_serial(dirs, srun_args, vasp_binary, log_name="relaxation.stdout", system_paths=None):
     """Run VASP sequentially in each directory (absolute paths, soft-fail)."""
     print(f"  Running VASP serially in {len(dirs)} director{'y' if len(dirs) == 1 else 'ies'}...")
     for dirpath in dirs:
         print(f"    Running VASP in {os.path.basename(dirpath)}...")
-        run_command(
-            f"srun {srun_args} {vasp_binary} > {log_name}",
-            cwd=dirpath,
-            check_success=False,
-        )
+        cmd = build_srun_cmd(srun_args, vasp_binary, f"> {log_name}")
+        write_standalone_script(dirpath, cmd, system_paths)
+        run_command(cmd, cwd=dirpath, check_success=False)
 
 
-def _run_hf_parallel(dirs, srun_args, vasp_binary, log_name="relaxation.stdout"):
+def _run_hf_parallel(dirs, srun_args, vasp_binary, log_name="relaxation.stdout", system_paths=None):
     """Run VASP concurrently across dirs using split srun args and --overlap."""
     print(f"  [hf_parallel] Running {len(dirs)} dir(s) in parallel...")
     split_args = split_srun_args(srun_args, len(dirs))
     if not split_args:
         print("  [hf_parallel] split_srun_args failed — falling back to serial")
-        _run_serial(dirs, srun_args, vasp_binary, log_name=log_name)
+        _run_serial(dirs, srun_args, vasp_binary, log_name=log_name, system_paths=system_paths)
         return
     procs = []
     for dirpath, sargs in zip(dirs, split_args):
+        # GPU-only path (hf_parallel is disabled whenever cpu_flag is set) --
+        # --overlap must sit right after "srun", so this doesn't use
+        # build_srun_cmd's "config supplies its own srun" detection.
         cmd = f"srun --overlap {sargs} {vasp_binary} > {log_name}"
+        write_standalone_script(dirpath, cmd, system_paths)
         print(f"    [{os.path.basename(dirpath)}] {cmd}")
         procs.append(subprocess.Popen(cmd, shell=True, cwd=dirpath))
     failed = []

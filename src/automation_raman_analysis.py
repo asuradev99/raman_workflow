@@ -15,7 +15,7 @@ from util import (
     Tee, run_command, load_config, validate_config, get_srun_args,
     make_pipeline_excepthook, run_relaxation,
     print_job_header, make_write_status,
-    set_expected_labels, require_path,
+    set_expected_labels, require_path, render_status_table, STEP_HISTORY,
 )
 
 # ── CLI flags via argparse ──────────────────────────────────────────────────
@@ -41,6 +41,16 @@ parser.add_argument(
     action="store_true",
     help="Internal: pipeline is running inside a provisioned allocation — use srun directly",
 )
+parser.add_argument(
+    "--no-post-process",
+    action="store_true",
+    help="Internal: run every step EXCEPT post_process (post_process runs separately on login)",
+)
+parser.add_argument(
+    "--only-post-process",
+    action="store_true",
+    help="Internal: run ONLY the post_process step (cheap, serial — runs on the login node)",
+)
 args, remaining = parser.parse_known_args()
 sys.argv = [sys.argv[0]] + remaining
 
@@ -49,6 +59,8 @@ CPU_FLAG = args.cpu
 SCRATCH_FLAG = args.scratch
 SALLOC_STEPS_FLAG = args.salloc_steps
 INSIDE_SALLOC_FLAG = args.inside_salloc
+NO_POST_PROCESS_FLAG = args.no_post_process
+ONLY_POST_PROCESS_FLAG = args.only_post_process
 
 # ── Material directory — must be CWD (run from inside a material dir) ─────────
 MATERIAL_DIR = os.getcwd()
@@ -100,22 +112,42 @@ CONFIG = load_config([
 
 validate_config(CONFIG, _PER_MAT_STEP_NAMES)
 
+# CPU mode can also be enabled from config (per-material `cpu: {enabled: true}`),
+# equivalent to passing --cpu on the command line.
+CPU_FLAG = CPU_FLAG or bool(CONFIG.get("cpu", {}).get("enabled", False))
+
+# Gamma-only binary (real-arithmetic, for 1x1x1 k-point runs) is an explicit
+# per-material choice -- `use_gam: true` -- never auto-detected from the
+# k-point mesh, so there's exactly one place selecting it and no risk of a
+# stale env var silently picking the wrong variant (see VASP_BINARY_CPU note
+# below).
+GAM_FLAG = bool(CONFIG.get("use_gam", False))
+
 # ── System paths — from YAML config, with env-var override for backward compat ─
 _sp = CONFIG.get("system_paths", {})
 BINARY_UTILITIES_DIR = os.environ.get("BINARY_UTILITIES_DIR") or _sp.get(
     "binary_utilities_dir", ""
 )
-VASP_BINARY_PATH = (
-    os.environ.get("VASP_BINARY_CPU") or _sp.get("vasp_binary_cpu", "")
-    if CPU_FLAG
-    else os.environ.get("VASP_BINARY") or _sp.get("vasp_binary", "")
-)
 
-require_path(VASP_BINARY_PATH, "VASP binary", os.path.isfile,
-             "Set system_paths.vasp_binary in config or VASP_BINARY env var.")
-print(f"VASP binary: {VASP_BINARY_PATH}" + (" (CPU)" if CPU_FLAG else ""))
+# (env_var, config_key) for each (CPU_FLAG, GAM_FLAG) combination. env still
+# wins over config, same precedence as the historical VASP_BINARY/VASP_BINARY_CPU.
+_BINARY_KEYS = {
+    (False, False): ("VASP_BINARY",         "vasp_binary"),
+    (False, True):  ("VASP_BINARY_GAM",     "vasp_binary_gam"),
+    (True,  False): ("VASP_BINARY_CPU",     "vasp_binary_cpu"),
+    (True,  True):  ("VASP_BINARY_GAM_CPU", "vasp_binary_gam_cpu"),
+}
+_env_key, _bin_key = _BINARY_KEYS[(CPU_FLAG, GAM_FLAG)]
+VASP_BINARY_PATH = os.environ.get(_env_key) or _sp.get(_bin_key, "")
+
+require_path(VASP_BINARY_PATH, f"VASP binary ({_bin_key})", os.path.isfile,
+             f"Set system_paths.{_bin_key} in config or {_env_key} env var.")
+print(f"VASP binary: {VASP_BINARY_PATH}"
+      + (" (CPU)" if CPU_FLAG else "") + (" (Gamma-only)" if GAM_FLAG else ""))
 if CPU_FLAG:
     print("  (CPU mode: --cpu flag set)")
+if GAM_FLAG:
+    print("  (Gamma-only mode: use_gam=true)")
 
 require_path(BINARY_UTILITIES_DIR, "binary_utilities_dir", os.path.isdir,
              "Set system_paths.binary_utilities_dir in config or BINARY_UTILITIES_DIR env var.")
@@ -142,7 +174,7 @@ sys.excepthook = make_pipeline_excepthook(STATUS_FILE)
 
 # ── Compute mode — must be defined before print_job_header ───────────────────
 COMPUTE_MODE = CONFIG.get("compute_mode", "interactive_manual")
-SRUN_ARGS = get_srun_args(CONFIG, COMPUTE_MODE, "srun_relax", CPU_FLAG)
+SRUN_ARGS = get_srun_args(CONFIG, COMPUTE_MODE, "srun_relax")
 
 # ── Job start header ──────────────────────────────────────────────────────────
 print_job_header(
@@ -199,6 +231,20 @@ if _PER_MAT_STEP_NAMES:
 else:
     PIPELINE_TO_RUN = PIPELINE
     EXPECTED = expected_labels(CONFIG, START_FROM_SUPERCELL)
+
+# ── post_process split ────────────────────────────────────────────────────────
+# In sbatch modes the big node allocation should not be held during the serial
+# post_process step. provision.py runs the VASP-heavy steps with --no-post-process
+# (post_process filtered out), then runs post_process on the login node with
+# --only-post-process. Rebuild EXPECTED so resume/status only track the kept steps.
+if NO_POST_PROCESS_FLAG or ONLY_POST_PROCESS_FLAG:
+    if NO_POST_PROCESS_FLAG:
+        PIPELINE_TO_RUN = [s for s in PIPELINE_TO_RUN if s.name != "post_process"]
+    else:
+        PIPELINE_TO_RUN = [s for s in PIPELINE_TO_RUN if s.name == "post_process"]
+    EXPECTED = []
+    for _s in PIPELINE_TO_RUN:
+        EXPECTED.extend(_s.resolved_labels(CONFIG, START_FROM_SUPERCELL))
 
 set_expected_labels(EXPECTED)
 
@@ -283,6 +329,7 @@ ctx = PipelineContext(
 # Skip decision is file-based: each step's _is_complete(work_dir, config)
 # inspects actual VASP output files. workflow.log is still written for
 # monitoring but is never consulted for resume decisions.
+_rendered_resume_table = False
 for step in PIPELINE_TO_RUN:
     step_labels = step.resolved_labels(CONFIG, START_FROM_SUPERCELL)
 
@@ -295,6 +342,14 @@ for step in PIPELINE_TO_RUN:
     if SALLOC_STEPS_FLAG and step.name not in PRE_DISPATCH_STEP_NAMES:
         print(f"\n  [salloc-steps] Pre-dispatch steps complete. Exiting.")
         break
+
+    # Full step-overview table, once: only fires here if something above was
+    # already marked "completed" (i.e. this run is resuming), giving one
+    # concise snapshot of prior progress before continuing — not a table per step.
+    if not _rendered_resume_table:
+        _rendered_resume_table = True
+        if any(h.get("status") == "completed" for h in STEP_HISTORY.values()):
+            render_status_table(STATUS_FILE, MATERIAL_NAME)
 
     ctx.current_label = step_labels[0]
     print(f"\n  [dispatch] {step.name} — {', '.join(step_labels)}")
