@@ -7,7 +7,14 @@ from .io import run_command
 
 
 def generate_kopia_script(raman_dir, ra_dirs):
-    """Write and execute the kopia script that copies vasprun.xml files to AXML/."""
+    """Write and execute the kopia script that copies vasprun.xml files into AXML/.
+
+    Real copies, not symlinks: the cp pulls each vasprun.xml through the node's
+    page cache right before genRAram610_dynamic parses it, which measured ~6x
+    faster per energy than cold Lustre reads through symlinks. Files already
+    copied (regular file, not a leftover symlink from the symlink-era kopia)
+    are skipped, so retries of post_process don't re-pay the multi-GB copy.
+    """
     kopia_path = os.path.join(raman_dir, "kopia")
     with open(kopia_path, "w") as kf:
         kf.write("#!/bin/bash\n")
@@ -16,7 +23,10 @@ def generate_kopia_script(raman_dir, ra_dirs):
         for d in ra_dirs:
             dirname = os.path.basename(d)
             xml_name = dirname[len("ra_pos_"):] if dirname.startswith("ra_pos_") else dirname
-            kf.write(f'cp "{dirname}/vasprun.xml" "AXML/{xml_name}.xml"\n')
+            src = f"{dirname}/vasprun.xml"
+            dst = f"AXML/{xml_name}.xml"
+            kf.write(f'{{ [ -f "{dst}" ] && [ ! -L "{dst}" ]; }} || '
+                     f'cp --remove-destination "{src}" "{dst}"\n')
     run_command(f"chmod +x kopia && ./kopia", cwd=raman_dir)
 
 

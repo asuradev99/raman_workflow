@@ -15,8 +15,14 @@ from util.slurm import build_omp_prefix
 # In sbatch_parallel these run inside a salloc; in sbatch_mix they run in
 # a dedicated Phase 1 sbatch job.  Everything after these is dispatched as
 # concurrent per-dir srun/sbatch calls.
+#
+# hf_setup is deliberately NOT in this set: it's pure file I/O (phonopy -d +
+# runHF, no VASP/srun call) and doesn't need its own compute allocation. It
+# now always runs at the start of Phase 2 (the main sbatch, or the login-node
+# continuation in sbatch_parallel) instead of holding a Phase-1 allocation
+# just for a few seconds of setup work.
 PRE_DISPATCH_STEP_NAMES = frozenset({
-    "scf_relax", "supercell", "hf_setup",
+    "scf_relax", "supercell",
     "defect_relax_1", "defect_relax_2", "defect_relax_2_cpu",
 })
 
@@ -94,6 +100,39 @@ STEP_REGISTRY.update({
         scf_relax.restart_defect_2,
     ),
 })
+
+
+def build_pipeline_to_run(per_mat_step_names: list) -> list:
+    """Resolve a material's `steps:` name list to Step objects, in that order.
+
+    Empty/absent `steps:` falls back to the full canonical PIPELINE (matches
+    the pre-per-material-steps default behavior).
+    """
+    if not per_mat_step_names:
+        return PIPELINE
+    unknown = [n for n in per_mat_step_names if n not in STEP_REGISTRY]
+    if unknown:
+        print(f"  [pipeline] WARNING: unknown step names in steps config: {unknown}")
+    return [STEP_REGISTRY[n] for n in per_mat_step_names if n in STEP_REGISTRY]
+
+
+def restart_pipeline_steps(pipeline_to_run: list, work_dir: str, config: dict) -> None:
+    """Run each step's restart() to clear its outputs, in pipeline order.
+
+    Idempotent (each step's restart() only removes files that still exist),
+    so it's safe to call this more than once for the same run — e.g. once in
+    provision.py before its resume/phase-skip checks (so those checks see a
+    clean slate rather than stale on-disk completion markers), and again in
+    automation_raman_analysis.py for invocations that bypass provision.py.
+    """
+    print(f"\n[restart] Restarting: {', '.join(s.name for s in pipeline_to_run)}")
+    for step in pipeline_to_run:
+        if step._restart is None:
+            print(f"  [restart] WARNING: '{step.name}' has no restart() — skipped")
+            continue
+        print(f"  [restart] Cleaning outputs for: {step.name}")
+        step._restart(work_dir, config)
+    print("[restart] Pre-pass complete. Pipeline will re-run cleared steps.\n")
 
 
 def expected_labels(config: dict, start_from_supercell: bool) -> list:
@@ -176,6 +215,8 @@ class PipelineContext:
     broadening_hwhm: Any = field(init=False)
     broadening_interpolation: int = field(init=False)
     broadening_normalization: int = field(init=False)
+    symmetry_filter_enabled: bool = field(init=False)
+    symmetry_filter_irreps: list = field(init=False)
 
     # ── Mutable dispatch state (set by the dispatch loop, not at construction) ─
     # The label (description string) of the step currently being dispatched —
@@ -265,6 +306,9 @@ class PipelineContext:
         self.broadening_hwhm          = _broadening.get("hwhm", 1)
         self.broadening_interpolation = _broadening.get("interpolation", 200)
         self.broadening_normalization = _broadening.get("normalization", 2)
+        _sym_filter = cfg.get("steps", {}).get("post_process", {}).get("symmetry_filter", {})
+        self.symmetry_filter_enabled = _sym_filter.get("enabled", False)
+        self.symmetry_filter_irreps  = _sym_filter.get("allowed_irreps", ["A1'", "E'"])
 
     @property
     def config(self) -> dict:

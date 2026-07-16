@@ -31,9 +31,12 @@ _RAMAN_WORKFLOW_DIR = os.path.dirname(_SRC_DIR)
 if _RAMAN_WORKFLOW_DIR not in sys.path:
     sys.path.insert(0, _RAMAN_WORKFLOW_DIR)
 
+import yaml
+
 from util.config import load_config
 from util.slurm import (build_bash_setup, run_via_salloc_pipe, submit_sbatch_wrapper,
                         SallocAllocationError, SbatchCancelledError)
+from src import build_pipeline_to_run, restart_pipeline_steps
 
 _PIPELINE_SCRIPT = os.path.join(_SRC_DIR, "automation_raman_analysis.py")
 
@@ -94,6 +97,22 @@ _fwd = []
 if SCRATCH_FLAG:  _fwd.append("--scratch")
 if CPU_FLAG:      _fwd.append("--cpu")
 if RESTART_FLAG:  _fwd.append("--restart")
+
+# ── Restart cleanup — must happen before any resume/phase-skip check below ───
+# sbatch_mix/sbatch_serial/sbatch_parallel decide whether to skip Phase 1/2/3
+# job submissions by checking on-disk is_complete() state (_is_complete(),
+# _are_relax_steps_done() further down). automation_raman_analysis.py's own
+# --restart cleanup only runs after a job is actually submitted, which is too
+# late to affect those decisions — a restart on a material with stale
+# "complete" outputs would otherwise skip straight to the last incomplete
+# phase. Doing the cleanup here, synchronously, before any gating check runs,
+# fixes that. (automation_raman_analysis.py still repeats this pre-pass for
+# invocations that bypass provision.py; it's idempotent, so no harm done.)
+if RESTART_FLAG:
+    with open(CONFIG_PATH) as _f:
+        _per_mat_raw = yaml.safe_load(_f) or {}
+    _pipeline_to_run = build_pipeline_to_run(list(_per_mat_raw.get("steps", {}).keys()))
+    restart_pipeline_steps(_pipeline_to_run, work_dir, CONFIG)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

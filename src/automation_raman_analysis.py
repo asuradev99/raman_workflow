@@ -215,22 +215,16 @@ print(f"Current working directory: {os.getcwd()}")
 # parse_resume_step() so its "is everything completed?" fallback check has
 # something to compare against.
 from src import (
-    PIPELINE, STEP_REGISTRY, expected_labels, PRE_DISPATCH_STEP_NAMES, PipelineContext,
+    PRE_DISPATCH_STEP_NAMES, PipelineContext,
+    build_pipeline_to_run, restart_pipeline_steps,
 )
 
 START_FROM_SUPERCELL = CONFIG.get("start_from_supercell", False)
 
-if _PER_MAT_STEP_NAMES:
-    _unknown = [n for n in _PER_MAT_STEP_NAMES if n not in STEP_REGISTRY]
-    if _unknown:
-        print(f"  [pipeline] WARNING: unknown step names in steps config: {_unknown}")
-    PIPELINE_TO_RUN = [STEP_REGISTRY[n] for n in _PER_MAT_STEP_NAMES if n in STEP_REGISTRY]
-    EXPECTED = []
-    for _s in PIPELINE_TO_RUN:
-        EXPECTED.extend(_s.resolved_labels(CONFIG, START_FROM_SUPERCELL))
-else:
-    PIPELINE_TO_RUN = PIPELINE
-    EXPECTED = expected_labels(CONFIG, START_FROM_SUPERCELL)
+PIPELINE_TO_RUN = build_pipeline_to_run(_PER_MAT_STEP_NAMES)
+EXPECTED = []
+for _s in PIPELINE_TO_RUN:
+    EXPECTED.extend(_s.resolved_labels(CONFIG, START_FROM_SUPERCELL))
 
 # ── post_process split ────────────────────────────────────────────────────────
 # In sbatch modes the big node allocation should not be held during the serial
@@ -251,17 +245,11 @@ set_expected_labels(EXPECTED)
 # ── Per-step restart pre-pass ─────────────────────────────────────────────────
 # Restarts exactly the steps in PIPELINE_TO_RUN (the `steps:` section in YAML,
 # or all steps if no section is present). Runs before the dispatch loop so all
-# cleared steps start from a clean slate.
+# cleared steps start from a clean slate. Idempotent — provision.py already
+# runs this same pre-pass before its own resume/phase-skip checks, so this is
+# a no-op there; it only does real work for invocations that bypass provision.py.
 if RESTART_FLAG:
-    _restart_names = [s.name for s in PIPELINE_TO_RUN]
-    print(f"\n[restart] Restarting: {', '.join(_restart_names)}")
-    for _rstep in PIPELINE_TO_RUN:
-        if _rstep._restart is None:
-            print(f"  [restart] WARNING: '{_rstep.name}' has no restart() — skipped")
-            continue
-        print(f"  [restart] Cleaning outputs for: {_rstep.name}")
-        _rstep._restart(WORK_DIR, CONFIG)
-    print("[restart] Pre-pass complete. Pipeline will re-run cleared steps.\n")
+    restart_pipeline_steps(PIPELINE_TO_RUN, WORK_DIR, CONFIG)
 
 
 def _step_is_done(step, work_dir, config):

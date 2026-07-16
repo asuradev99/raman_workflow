@@ -123,10 +123,17 @@ def run(ctx):
         os.makedirs(energy_dir, exist_ok=True)
         raman_file = os.path.join(raman_dir, f"Raman_intensity_complex_{label}")
         if os.path.exists(raman_file):
+            with open(raman_file) as src:
+                rows = src.readlines()
             with open(os.path.join(energy_dir, "Raman_intensity_specific.dat"), "w") as f:
                 f.write("# Freq(cm-1)   Intensity(arb.)   Irrep.\n")
-                with open(raman_file) as src:
-                    f.write(src.read())
+                f.writelines(rows)
+            if ctx.symmetry_filter_enabled:
+                allowed = set(ctx.symmetry_filter_irreps)
+                filtered_rows = [r for r in rows if r.split() and r.split()[-1] in allowed]
+                with open(os.path.join(energy_dir, "Raman_intensity_specific_filtered.dat"), "w") as f:
+                    f.write(f"# Freq(cm-1)   Intensity(arb.)   Irrep.  [symmetry-filtered: {sorted(allowed)}]\n")
+                    f.writelines(filtered_rows)
     if os.path.exists(plot_script):
         run_command(f"echo -e '5.0\\nl' | python3 {plot_script}", cwd=raman_dir, check_success=False)
     else:
