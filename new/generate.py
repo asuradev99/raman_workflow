@@ -306,10 +306,9 @@ esac
 
 [ -f POSCAR ] || cp ../input/POSCAR POSCAR 2>/dev/null || true
 cp ../input/POTCAR POTCAR 2>/dev/null || true
-{seed_lines}cat > INCAR <<'INCAR_EOF'
-{incar}INCAR_EOF
-cat > KPOINTS <<'KPT_EOF'
-{kpts}KPT_EOF
+{seed_lines}for f in INCAR KPOINTS; do
+    [ -s "$f" ] || {{ echo "[{step}] FATAL: $f missing — run generate.py" >&2; exit 1; }}
+done
 resume_contcar
 
 for attempt in $(seq 1 {b['MAX_RESTARTS']}); do
@@ -380,12 +379,9 @@ compgen -G "hf_POSCAR-*" >/dev/null && {{ echo "[hf_setup] already complete"; ex
 relax_dir=../scf
 cp "$relax_dir/CONTCAR" POSCAR_unitcell
 cp ../input/POTCAR POTCAR 2>/dev/null || true
-cat > INCAR <<'INCAR_EOF'
-{incar}INCAR_EOF
-cat > KPOINTS <<'KPT_EOF'
-{kpts}KPT_EOF
-cat > symmetry.conf <<'CONF_EOF'
-{symmetry_conf(b['PHONOPY_DIM'])}CONF_EOF
+for f in INCAR KPOINTS symmetry.conf; do
+    [ -s "$f" ] || {{ echo "[hf_setup] FATAL: $f missing — run generate.py" >&2; exit 1; }}
+done
 
 [ -s SPOSCAR ] || phonopy -d --dim="{b['PHONOPY_DIM']}" --amplitude={b['PHONOPY_AMP']} -c POSCAR_unitcell
 {b['BIN']}/runHF
@@ -462,10 +458,9 @@ ndirs=$(ls -d hf_POSCAR-* | wc -l)
 (( ${{#vaspruns[@]}} < ndirs )) && echo "[phonon_post] WARNING: ${{#vaspruns[@]}}/${{ndirs}} vasprun.xml present"
 
 phonopy -f "${{vaspruns[@]}}"
-cat > eigenvectors.conf <<'CONF_EOF'
-{eigenvectors_conf(b)}CONF_EOF
-cat > symmetry.conf <<'SYM_EOF'
-{symmetry_conf(b['PHONOPY_DIM'])}SYM_EOF
+for f in eigenvectors.conf symmetry.conf; do
+    [ -s "$f" ] || {{ echo "[phonon_post] FATAL: $f missing — run generate.py" >&2; exit 1; }}
+done
 phonopy -c POSCAR_unitcell eigenvectors.conf
 phonopy -c POSCAR_unitcell symmetry.conf
 """
@@ -491,10 +486,9 @@ compgen -G "ra_pos_*" >/dev/null && {{ echo "[raman_prep] already complete"; exi
 cp ../scf/CONTCAR CONTCAR
 for f in CHGCAR WAVECAR; do [ -s "../scf/$f" ] && ln -sf "../scf/$f" "$f"; done
 cp ../input/POTCAR POTCAR 2>/dev/null || true
-cat > INCAR <<'INCAR_EOF'
-{incar}INCAR_EOF
-cat > KPOINTS <<'KPT_EOF'
-{kpts}KPT_EOF
+for f in INCAR KPOINTS; do
+    [ -s "$f" ] || {{ echo "[raman_prep] FATAL: $f missing — run generate.py" >&2; exit 1; }}
+done
 
 {b['BIN']}/ramdiscar
 echo "go" | {b['BIN']}/genRApos610
@@ -740,6 +734,45 @@ def main():
 
     for sub in ("scf", "hf", "raman"):
         os.makedirs(os.path.join(work_dir, sub), exist_ok=True)
+
+    # ── Write static VASP/phonopy input files up front, once, as real files ──
+    # (INCAR/KPOINTS/symmetry.conf/eigenvectors.conf) instead of heredoc-ing them
+    # inside the generated bash. Inspectable/editable directly; the scripts just
+    # verify they exist before running.
+    if "scf_relax" in active_steps:
+        write(os.path.join(work_dir, "scf", "INCAR"),
+              build_incar_content(cfg, "scf_relax"), executable=False)
+        write(os.path.join(work_dir, "scf", "KPOINTS"),
+              kpoints_content("K-points", b["SCF_MESH"], b["SCF_SHIFT"]), executable=False)
+    if "defect_relax_1" in active_steps:
+        # defect_relax_1 shares the scf/ directory; only write INCAR/KPOINTS here
+        # if scf_relax didn't already (defect-only materials skip scf_relax).
+        if "scf_relax" not in active_steps:
+            write(os.path.join(work_dir, "scf", "KPOINTS"),
+                  kpoints_content("K-points", b["DEFECT_MESH"], b["DEFECT_SHIFT"]), executable=False)
+        write(os.path.join(work_dir, "scf", "INCAR"),
+              build_incar_content(cfg, "defect_relax_1"), executable=False)
+        if "scf_relax" in active_steps:
+            # defect_relax_1's own KPOINTS take precedence when both are active
+            write(os.path.join(work_dir, "scf", "KPOINTS"),
+                  kpoints_content("K-points", b["DEFECT_MESH"], b["DEFECT_SHIFT"]), executable=False)
+    if "hf_setup" in active_steps:
+        write(os.path.join(work_dir, "hf", "INCAR"),
+              build_incar_content(cfg, "force_consts"), executable=False)
+        write(os.path.join(work_dir, "hf", "KPOINTS"),
+              kpoints_content("K-points", b["HF_MESH"], b["HF_SHIFT"]), executable=False)
+        write(os.path.join(work_dir, "hf", "symmetry.conf"),
+              symmetry_conf(b["PHONOPY_DIM"]), executable=False)
+    if "phonon_post" in active_steps:
+        write(os.path.join(work_dir, "hf", "eigenvectors.conf"),
+              eigenvectors_conf(b), executable=False)
+        write(os.path.join(work_dir, "hf", "symmetry.conf"),
+              symmetry_conf(b["PHONOPY_DIM"]), executable=False)
+    if "raman_prep" in active_steps:
+        write(os.path.join(work_dir, "raman", "INCAR"),
+              build_incar_content(cfg, "resonant_vasp"), executable=False)
+        write(os.path.join(work_dir, "raman", "KPOINTS"),
+              kpoints_content("K-points", b["RAMAN_MESH"], b["RAMAN_SHIFT"]), executable=False)
 
     # emit step scripts
     if "scf_relax" in active_steps:
