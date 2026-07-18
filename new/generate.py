@@ -7,7 +7,10 @@ Everything config-derived is baked in as literals; the generated bash has no
 dependency on this repo except that it sources new/common.sh and calls
 new/check_*.py by absolute path.
 
-    python3 generate.py <material_dir> [--scratch] [--cpu] [--debug]
+    python3 generate.py <material_dir> [--no-scratch] [--cpu] [--debug]
+
+Runs on $SCRATCH by default (output copied back to the material dir); pass
+--no-scratch to run directly in the material dir.
 
 This file is standalone: no imports from the old src/ or util/ packages. The
 config-merge and INCAR-build logic below are ported (not imported) from
@@ -669,12 +672,14 @@ def write(path, content, executable=True):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("material_dir")
-    ap.add_argument("--scratch", action="store_true")
+    ap.add_argument("--no-scratch", dest="scratch", action="store_false",
+                    help="run in the material dir instead of $SCRATCH (scratch is the default)")
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--debug", action="store_true", help="append VASP --dry-run to every VASP call")
     ap.add_argument("--shared", default=os.path.join(
         os.environ.get("RAMAN_PROJECT_DIR", os.path.dirname(os.path.dirname(REPO_NEW))),
         "shared_workflow_settings.yaml"))
+    ap.set_defaults(scratch=True)
     args = ap.parse_args()
 
     material_dir = os.path.abspath(args.material_dir)
@@ -692,27 +697,30 @@ def main():
     validate_config(cfg, active_steps)
 
     name = os.path.basename(material_dir)
-    if args.debug:
-        work_dir = os.path.join(material_dir, "debug")
-    elif args.scratch:
+    # Base work dir: $SCRATCH by default, material dir with --no-scratch.
+    if args.scratch:
         scratch = os.environ.get("SCRATCH", "")
         if not scratch:
-            sys.exit("ERROR: --scratch requires $SCRATCH")
-        work_dir = os.path.join(scratch, "vasp_calculations", name)
+            sys.exit("ERROR: default is scratch mode but $SCRATCH is unset; "
+                     "pass --no-scratch to run in the material dir.")
+        base_dir = os.path.join(scratch, "vasp_calculations", name)
     else:
-        work_dir = material_dir
+        base_dir = material_dir
+    # --debug nests a throwaway tree under the base so it never touches real data.
+    work_dir = os.path.join(base_dir, "debug") if args.debug else base_dir
 
-    # --scratch: create input symlink so scripts find POSCAR/POTCAR; bake HOME_OUTPUT_DIR
+    # Whenever the work dir isn't the material dir itself, create an `input`
+    # symlink so the scripts find POSCAR/POTCAR, and (non-debug) bake the
+    # HOME_OUTPUT_DIR so post_process copies results back to $HOME.
     home_output = ""
-    if args.scratch or args.debug:
+    if work_dir != material_dir:
         os.makedirs(work_dir, exist_ok=True)
         link = os.path.join(work_dir, "input")
-        if os.path.islink(link) or os.path.exists(link):
-            if os.path.islink(link):
-                os.unlink(link)
+        if os.path.islink(link):
+            os.unlink(link)
         if not os.path.exists(link):
             os.symlink(os.path.join(material_dir, "input"), link)
-        if args.scratch:
+        if not args.debug:
             home_output = os.path.join(material_dir, "output")
 
     b = build_bake(cfg, args.cpu, home_output)
