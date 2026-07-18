@@ -1,0 +1,48 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+*.so
+.pytest_cache/
+*.whl
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+.env/
+
+# ── Editor / IDE ──────────────────────────────────────────────────────────────
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.orig
+*.bak
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Pipeline logs (generated at runtime) ──────────────────────────────────────
+pipeline.log
+*.log
+
+# ── Shell scripts generated dynamically by the pipeline ───────────────────────
+# These are created at runtime (e.g., kopia, ramfile_dynamic.sh) and should not
+# be tracked — their template sources live in BINARY_UTILITIES_DIR.
+kopia
+ramfile_dynamic.sh
+
+# ── Temporary / scratch files ─────────────────────────────────────────────────
+tmp/
+scratch/
+*.tmp
+
+# ── YAML lockfiles (if any) ───────────────────────────────────────────────────
+# workflow_settings.yaml should be tracked (it's the config); lockfiles should not
+*-lock.yaml
