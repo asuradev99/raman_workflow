@@ -313,7 +313,7 @@ resume_contcar
 
 for attempt in $(seq 1 {b['MAX_RESTARTS']}); do
     rm -f OUTCAR
-    srun {b['SRUN_PER_DIR']} {b['VASP_BINARY']}{dryrun} > relaxation.stdout 2>&1 || true
+    srun {b['SRUN_RELAX']} {b['VASP_BINARY']}{dryrun} > relaxation.stdout 2>&1 || true
     if python3 {CHECK_CONV} --relax . >/dev/null 2>&1; then
 {post_success}        echo "[{step}] converged on attempt $attempt"
         exit 0
