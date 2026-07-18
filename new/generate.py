@@ -94,7 +94,7 @@ def validate_config(cfg, step_names):
         if sect not in cfg:
             missing.append(f"[{sect}] section missing")
 
-    known = set(STEP_ORDER) | {"defect_relax_1", "defect_relax_2", "defect_relax_2_cpu"}
+    known = set(STEP_ORDER) | {"defect_relax_1"}
     for name in step_names:
         if name not in known:
             missing.append(f"unknown step '{name}'")
@@ -158,8 +158,7 @@ STEP_ORDER = [
     "phonon_post", "raman_prep", "resonant_vasp", "post_process",
 ]
 # steps that need a GPU allocation
-COMPUTE_STEPS = {"scf_relax", "supercell", "defect_relax_1", "defect_relax_2",
-                 "defect_relax_2_cpu", "force_consts", "resonant_vasp"}
+COMPUTE_STEPS = {"scf_relax", "supercell", "defect_relax_1", "force_consts", "resonant_vasp"}
 
 
 # =============================================================================
@@ -270,11 +269,9 @@ def eigenvectors_conf(b):
 
 
 def emit_relax(cfg, b, step, dst_dir, debug):
-    """scf_relax / defect_relax_1 / defect_relax_2. dst_dir: 'scf' or 'scf2'."""
+    """scf_relax / defect_relax_1. dst_dir: 'scf' (single-stage relax only)."""
     incar = build_incar_content(cfg, step)
-    if step == "defect_relax_2" or step == "defect_relax_2_cpu":
-        mesh, shift = b["DEFECT_MESH"], b["DEFECT_SHIFT"]
-    elif step == "defect_relax_1":
+    if step == "defect_relax_1":
         mesh, shift = b["DEFECT_MESH"], b["DEFECT_SHIFT"]
     else:
         mesh, shift = b["SCF_MESH"], b["SCF_SHIFT"]
@@ -380,7 +377,7 @@ case "${{1:-}}" in
 esac
 compgen -G "hf_POSCAR-*" >/dev/null && {{ echo "[hf_setup] already complete"; exit 0; }}
 
-relax_dir=../scf; [ -s ../scf2/CONTCAR ] && relax_dir=../scf2
+relax_dir=../scf
 cp "$relax_dir/CONTCAR" POSCAR_unitcell
 cp ../input/POTCAR POTCAR 2>/dev/null || true
 cat > INCAR <<'INCAR_EOF'
@@ -610,17 +607,17 @@ def emit_run_all(cfg, b, active_steps, work_dir):
 
     # map step name -> script path
     def path(step):
-        if step in ("scf_relax", "defect_relax_1"):
-            return f"scf/run_{step.replace('scf_relax','relax')}.sh" if step == "scf_relax" else "scf/run_defect_relax_1.sh"
-        if step == "defect_relax_2":
-            return "scf2/run_defect_relax_2.sh"
+        if step == "scf_relax":
+            return "scf/run_relax.sh"
+        if step == "defect_relax_1":
+            return "scf/run_defect_relax_1.sh"
         if step in ("supercell", "hf_setup", "force_consts", "phonon_post"):
             return f"hf/run_{step}.sh"
         return f"raman/run_{step}.sh"
 
     if mode == "sbatch_mix":
         # relax phase
-        relax_steps = [s for s in active_steps if s in ("scf_relax", "supercell", "defect_relax_1", "defect_relax_2")]
+        relax_steps = [s for s in active_steps if s in ("scf_relax", "supercell", "defect_relax_1")]
         main_steps = [s for s in active_steps if s in ("force_consts", "resonant_vasp")]
         login_mid = [s for s in active_steps if s in ("hf_setup", "phonon_post", "raman_prep")]
         post = [s for s in active_steps if s == "post_process"]
@@ -741,7 +738,7 @@ def main():
     print(f"  work_dir: {work_dir}")
     print(f"  mode: {b['COMPUTE_MODE']}  steps: {active_steps}\n")
 
-    for sub in ("scf", "scf2", "hf", "raman"):
+    for sub in ("scf", "hf", "raman"):
         os.makedirs(os.path.join(work_dir, sub), exist_ok=True)
 
     # emit step scripts
@@ -751,9 +748,6 @@ def main():
     if "defect_relax_1" in active_steps:
         write(os.path.join(work_dir, "scf", "run_defect_relax_1.sh"),
               emit_relax(cfg, b, "defect_relax_1", "scf", args.debug))
-    if "defect_relax_2" in active_steps:
-        write(os.path.join(work_dir, "scf2", "run_defect_relax_2.sh"),
-              emit_relax(cfg, b, "defect_relax_2", "scf2", args.debug))
     if "supercell" in active_steps:
         write(os.path.join(work_dir, "hf", "run_supercell.sh"),
               emit_supercell(cfg, b, args.debug))
