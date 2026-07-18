@@ -67,7 +67,13 @@ _DELETED_MODES = {"sbatch_parallel", "sbatch_serial", "interactive_serial", "sba
 
 def validate_config(cfg, step_names):
     missing = []
-    mode = cfg.get("compute_mode", "interactive")
+    mode = cfg.get("compute_mode")
+    if mode is None:
+        sys.exit(
+            "ERROR: compute_mode is not set in config.\n"
+            "       Set compute_mode: \"interactive\" or \"sbatch_mix\" in "
+            "shared_workflow_settings.yaml or the per-material config."
+        )
     if mode in _DELETED_MODES:
         sys.exit(
             f"ERROR: compute_mode '{mode}' is not supported by the new pipeline.\n"
