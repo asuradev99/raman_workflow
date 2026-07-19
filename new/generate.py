@@ -629,13 +629,16 @@ def emit_run_all(cfg, b, active_steps, work_dir):
     if mode == "sbatch_mix":
         # relax phase
         relax_steps = [s for s in active_steps if s in ("scf_relax", "supercell", "defect_relax_1")]
-        # force_consts and resonant_vasp can't share one allocation: resonant_vasp
-        # runs on ra_pos_* dirs that raman_prep (a login step) creates, and
-        # raman_prep itself runs after phonon_post, which needs force_consts'
-        # output. Real order: force_consts -> phonon_post -> raman_prep -> resonant_vasp.
-        force_consts_steps = [s for s in active_steps if s == "force_consts"]
-        resonant_steps = [s for s in active_steps if s == "resonant_vasp"]
-        login_mid = [s for s in active_steps if s in ("hf_setup", "phonon_post", "raman_prep")]
+        # force_consts, phonon_post, raman_prep, resonant_vasp all stay in ONE
+        # allocation (one queue wait) but must run in this exact order:
+        # resonant_vasp needs raman_prep's ra_pos_* dirs, raman_prep needs
+        # phonon_post's output, phonon_post needs force_consts' vasprun.xml.
+        # phonon_post/raman_prep are login-safe (no srun) but run fine inside
+        # a GPU allocation too, so bundling them here costs nothing and saves
+        # a second queue wait.
+        main_steps = [s for s in active_steps
+                      if s in ("force_consts", "phonon_post", "raman_prep", "resonant_vasp")]
+        login_mid = [s for s in active_steps if s == "hf_setup"]
         post = [s for s in active_steps if s == "post_process"]
 
         def phase(steps, sbatch_args, jobname):
@@ -679,18 +682,11 @@ def emit_run_all(cfg, b, active_steps, work_dir):
         for st in active_steps:
             if st in login_mid and st == "hf_setup":
                 lines.append(f"run_until_complete {path(st)}   # login")
-        if force_consts_steps:
+        if main_steps:
             lines.append("")
-            lines.append("# ── force constants (own allocation; phonon_post needs its output) ──")
-            lines.append(phase(force_consts_steps, b["SBATCH_MAIN"], f"force_consts_{name}"))
-            lines.append("")
-        for st in active_steps:
-            if st in ("phonon_post", "raman_prep"):
-                lines.append(f"run_until_complete {path(st)}   # login")
-        if resonant_steps:
-            lines.append("")
-            lines.append("# ── resonant vasp (own allocation; needs raman_prep's ra_pos_* dirs) ──")
-            lines.append(phase(resonant_steps, b["SBATCH_MAIN"], f"resonant_{name}"))
+            lines.append("# ── main compute (one allocation: force_consts -> phonon_post -> "
+                         "raman_prep -> resonant_vasp) ──")
+            lines.append(phase(main_steps, b["SBATCH_MAIN"], f"main_{name}"))
             lines.append("")
         if post:
             lines.append("")
