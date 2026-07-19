@@ -44,38 +44,16 @@ run_until_complete() {
     echo "=== $step complete at $(date '+%H:%M:%S') ==="
 }
 
-# ── resubmit_until_done <jobname> <sbatch-args-string> <script-file> <step...> ─
-# Wraps a whole sbatch --wait phase in its own retry loop. A phase job can die
-# for reasons run_until_complete can't retry from inside (Slurm TIMEOUT kills
-# the entire allocation, including the shell running the retry loop) -- this
-# is the outer layer that resubmits the sbatch job itself when that happens.
-# script_file holds the heredoc body to submit (written by the caller so this
-# stays a plain function, no quoting-through-quoting).  Bounded by MAX_RETRIES,
-# same as run_until_complete, so a genuinely broken phase still aborts loudly
-# instead of resubmitting forever.
-: "${MAX_PHASE_RETRIES:=10}"
-resubmit_until_done() {
-    local jobname="$1" sbatch_args="$2" script_file="$3"; shift 3
-    local steps=("$@") tries=0
-    while true; do
-        local all_done=1
-        for st in "${steps[@]}"; do
-            bash "$st" --check || { all_done=0; break; }
-        done
-        if [ "$all_done" -eq 1 ]; then
-            echo "=== [resubmit_until_done] $jobname: all steps already done ==="
-            return 0
-        fi
-        if (( tries >= MAX_PHASE_RETRIES )); then
-            echo "FATAL: $jobname phase did not complete after $MAX_PHASE_RETRIES sbatch submissions" >&2
-            exit 1
-        fi
-        tries=$(( tries + 1 ))
-        echo "=== [resubmit_until_done] $jobname: submitting sbatch (phase attempt $tries) at $(date '+%H:%M:%S') ==="
-        sbatch --wait $sbatch_args --requeue -J "$jobname" \
-            --mail-type=BEGIN,FAIL,END --mail-user=easuresh@mit.edu "$script_file"
-        echo "=== [resubmit_until_done] $jobname: sbatch --wait returned at $(date '+%H:%M:%S') ==="
+# ── phase_steps_done <step...> ──  true iff every step's --check already passes
+# Used by run_all.sh's per-phase resubmit loop (see emit_run_all) to decide
+# whether a Slurm TIMEOUT'd sbatch phase actually needs resubmitting, or
+# whether every step in it already finished/checkpointed before the timeout.
+phase_steps_done() {
+    local st
+    for st in "$@"; do
+        bash "$st" --check || return 1
     done
+    return 0
 }
 
 # ── resume_contcar ──  crash/requeue resume: continue from the checkpoint
