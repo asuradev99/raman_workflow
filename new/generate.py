@@ -642,7 +642,8 @@ def emit_run_all(cfg, b, active_steps, work_dir):
         post = [s for s in active_steps if s == "post_process"]
 
         def phase(steps, sbatch_args, jobname):
-            out = [f"sbatch --wait {sbatch_args} --requeue -J {jobname} <<PHASE",
+            out = [f"sbatch --wait {sbatch_args} --requeue -J {jobname} "
+                   f"--mail-type=BEGIN,FAIL,END --mail-user=easuresh@mit.edu <<PHASE",
                    "#!/bin/bash",
                    f'cd {work_dir} && source {COMMON_SH}']
             for st in steps:
