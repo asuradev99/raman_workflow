@@ -12,10 +12,10 @@
 
 # ── Environment (Perlmutter) ────────────────────────────────────────────────
 # Mirrors system_paths.{conda_init, conda_env, vasp_modules} in the shared YAML.
-source ~/.bashrc 2>/dev/null || true
+source ~/.bashrc
 source /global/common/software/m3035/conda/etc/profile.d/conda.sh
 conda activate /global/common/software/m526/phonopy_env
-module load gpu PrgEnv-nvidia cray-hdf5 cray-fftw nccl/2.18.3-cu12 vasp/6.4.3-gpu 2>/dev/null || true
+module load gpu PrgEnv-nvidia cray-hdf5 cray-fftw nccl/2.18.3-cu12 vasp/6.4.3-gpu
 
 # ── run_until_complete <step-script> ────────────────────────────────────────
 # The entire "orchestration". A step reports done via `bash step.sh --check`

@@ -313,7 +313,12 @@ resume_contcar
 
 for attempt in $(seq 1 {b['MAX_RESTARTS']}); do
     rm -f OUTCAR
-    srun {b['SRUN_RELAX']} {b['VASP_BINARY']}{dryrun} > relaxation.stdout 2>&1 || true
+    srun {b['SRUN_RELAX']} {b['VASP_BINARY']}{dryrun} 2>&1 | tee relaxation.stdout
+    srun_rc=${{PIPESTATUS[0]}}
+    if [ "$srun_rc" -ne 0 ]; then
+        echo "[{step}] FATAL: srun exited $srun_rc on attempt $attempt" >&2
+        exit 1
+    fi
     if python3 {CHECK_CONV} --relax . >/dev/null 2>&1; then
 {post_success}        echo "[{step}] converged on attempt $attempt"
         exit 0
@@ -351,7 +356,9 @@ cat > groundstate/INCAR <<'INCAR_EOF'
 {incar}INCAR_EOF
 cat > groundstate/KPOINTS <<'KPT_EOF'
 {kpts}KPT_EOF
-( cd groundstate && srun {b['SRUN_PER_DIR']} {b['VASP_BINARY']}{dryrun} > supercell_relax.stdout 2>&1 ) || true
+( cd groundstate && srun {b['SRUN_PER_DIR']} {b['VASP_BINARY']}{dryrun} 2>&1 | tee supercell_relax.stdout; exit "${{PIPESTATUS[0]}}" )
+srun_rc=$?
+[ "$srun_rc" -eq 0 ] || {{ echo "[supercell] FATAL: srun exited $srun_rc" >&2; exit 1; }}
 python3 {CHECK_CONV} --relax groundstate >/dev/null 2>&1 || {{ echo "[supercell] FATAL: groundstate relax not converged" >&2; exit 1; }}
 n=$(grep -c 'reached required accuracy' groundstate/OUTCAR 2>/dev/null || echo 0)
 cp groundstate/CONTCAR CONTCAR_supercell_relaxed
