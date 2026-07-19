@@ -157,8 +157,6 @@ STEP_ORDER = [
     "scf_relax", "supercell", "hf_setup", "force_consts",
     "phonon_post", "raman_prep", "resonant_vasp", "post_process",
 ]
-# steps that need a GPU allocation
-COMPUTE_STEPS = {"scf_relax", "supercell", "defect_relax_1", "force_consts", "resonant_vasp"}
 
 
 # =============================================================================
@@ -372,7 +370,14 @@ def emit_hf_setup(cfg, b, debug):
     incar = build_incar_content(cfg, "force_consts")
     kpts = kpoints_content("K-points", b["HF_MESH"], b["HF_SHIFT"])
     dryrun = " --dry-run" if debug else ""
-    symlink_src = "../../scf" if b["START_FROM_SUPERCELL"] else "../groundstate"
+    # start_from_supercell: defect_relax_1 already produced the full supercell
+    # in ../scf; hf_setup reads its CONTCAR directly, and CHGCAR/WAVECAR seeds
+    # live there too. Otherwise emit_supercell relaxed the supercell itself
+    # and left CONTCAR/CHGCAR/WAVECAR in this same hf/ directory (its own cwd)
+    # -- reading from ../scf here would be the pre-supercell unit cell, wrong.
+    sfs = b["START_FROM_SUPERCELL"]
+    relax_dir = "../scf" if sfs else "."
+    symlink_src = "../../scf" if sfs else "../groundstate"
     s = _header()
     s += f"""
 case "${{1:-}}" in
@@ -383,7 +388,7 @@ if compgen -G "hf_POSCAR-*" >/dev/null; then
     echo "[hf_setup] already complete"; exit 0
 fi
 
-relax_dir=../scf
+relax_dir={relax_dir}
 cp "$relax_dir/CONTCAR" POSCAR_unitcell
 cp ../input/POTCAR POTCAR 2>/dev/null || true
 for f in INCAR KPOINTS symmetry.conf; do
@@ -638,7 +643,6 @@ def emit_run_all(cfg, b, active_steps, work_dir):
         # a second queue wait.
         main_steps = [s for s in active_steps
                       if s in ("force_consts", "phonon_post", "raman_prep", "resonant_vasp")]
-        login_mid = [s for s in active_steps if s == "hf_setup"]
         post = [s for s in active_steps if s == "post_process"]
 
         def phase(steps, sbatch_args, jobname):
@@ -678,10 +682,8 @@ def emit_run_all(cfg, b, active_steps, work_dir):
             lines.append("# ── relax (own allocation; hf_setup needs its output) ──")
             lines.append(phase(relax_steps, b["SBATCH_RELAX"], f"relax_{name}"))
             lines.append("")
-        # login steps interleave by dependency: hf_setup after relax, before force_consts
-        for st in active_steps:
-            if st in login_mid and st == "hf_setup":
-                lines.append(f"run_until_complete {path(st)}   # login")
+        if "hf_setup" in active_steps:
+            lines.append(f"run_until_complete {path('hf_setup')}   # login")
         if main_steps:
             lines.append("")
             lines.append("# ── main compute (one allocation: force_consts -> phonon_post -> "
@@ -786,23 +788,20 @@ def main():
     # (INCAR/KPOINTS/symmetry.conf/eigenvectors.conf) instead of heredoc-ing them
     # inside the generated bash. Inspectable/editable directly; the scripts just
     # verify they exist before running.
+    if "scf_relax" in active_steps and "defect_relax_1" in active_steps:
+        sys.exit("ERROR: scf_relax and defect_relax_1 can't both be active -- "
+                  "they'd overwrite each other's scf/INCAR and scf/KPOINTS "
+                  "(both run in the same scf/ directory). Use one or the other.")
     if "scf_relax" in active_steps:
         write(os.path.join(work_dir, "scf", "INCAR"),
               build_incar_content(cfg, "scf_relax"), executable=False)
         write(os.path.join(work_dir, "scf", "KPOINTS"),
               kpoints_content("K-points", b["SCF_MESH"], b["SCF_SHIFT"]), executable=False)
     if "defect_relax_1" in active_steps:
-        # defect_relax_1 shares the scf/ directory; only write INCAR/KPOINTS here
-        # if scf_relax didn't already (defect-only materials skip scf_relax).
-        if "scf_relax" not in active_steps:
-            write(os.path.join(work_dir, "scf", "KPOINTS"),
-                  kpoints_content("K-points", b["DEFECT_MESH"], b["DEFECT_SHIFT"]), executable=False)
         write(os.path.join(work_dir, "scf", "INCAR"),
               build_incar_content(cfg, "defect_relax_1"), executable=False)
-        if "scf_relax" in active_steps:
-            # defect_relax_1's own KPOINTS take precedence when both are active
-            write(os.path.join(work_dir, "scf", "KPOINTS"),
-                  kpoints_content("K-points", b["DEFECT_MESH"], b["DEFECT_SHIFT"]), executable=False)
+        write(os.path.join(work_dir, "scf", "KPOINTS"),
+              kpoints_content("K-points", b["DEFECT_MESH"], b["DEFECT_SHIFT"]), executable=False)
     if "hf_setup" in active_steps:
         write(os.path.join(work_dir, "hf", "INCAR"),
               build_incar_content(cfg, "force_consts"), executable=False)
