@@ -302,19 +302,24 @@ case "${{1:-}}" in
     s += """; exit 0 ;;
 esac
 """
-    s += f"""python3 {CHECK_CONV} --relax . >/dev/null 2>&1 && [ -s {done_file} ] && {{ echo "[{step}] already complete"; exit 0; }}
+    s += f"""echo "[{step}] start: $(date '+%H:%M:%S') pwd=$(pwd)"
+python3 {CHECK_CONV} --relax . >/dev/null 2>&1 && [ -s {done_file} ] && {{ echo "[{step}] already complete"; exit 0; }}
 
 [ -f POSCAR ] || cp ../input/POSCAR POSCAR 2>/dev/null || true
 cp ../input/POTCAR POTCAR 2>/dev/null || true
 {seed_lines}for f in INCAR KPOINTS; do
     [ -s "$f" ] || {{ echo "[{step}] FATAL: $f missing — run generate.py" >&2; exit 1; }}
 done
+echo "[{step}] INCAR/KPOINTS present, resuming from checkpoint if any"
 resume_contcar
+echo "[{step}] entering relax loop (max {b['MAX_RESTARTS']} attempts)"
 
 for attempt in $(seq 1 {b['MAX_RESTARTS']}); do
+    echo "[{step}] attempt $attempt: launching srun at $(date '+%H:%M:%S')"
     rm -f OUTCAR
     srun {b['SRUN_RELAX']} {b['VASP_BINARY']}{dryrun} 2>&1 | tee relaxation.stdout
     srun_rc=${{PIPESTATUS[0]}}
+    echo "[{step}] attempt $attempt: srun exited $srun_rc at $(date '+%H:%M:%S')"
     if [ "$srun_rc" -ne 0 ]; then
         echo "[{step}] FATAL: srun exited $srun_rc on attempt $attempt" >&2
         exit 1
@@ -323,6 +328,7 @@ for attempt in $(seq 1 {b['MAX_RESTARTS']}); do
 {post_success}        echo "[{step}] converged on attempt $attempt"
         exit 0
     fi
+    echo "[{step}] attempt $attempt: not yet converged, will retry"
     resume_contcar
 done
 echo "[{step}] FATAL: not converged after {b['MAX_RESTARTS']} attempts" >&2
@@ -436,12 +442,14 @@ check_all && {{ echo "[dispatch] already complete"; exit 0; }}
 
 dirs=( {glob} )
 concurrent=${{SLURM_JOB_NUM_NODES:-1}}
-echo "[dispatch] ${{#dirs[@]}} dirs, ${{concurrent}}/batch"
+echo "[dispatch] ${{#dirs[@]}} dirs, ${{concurrent}}/batch, starting at $(date '+%H:%M:%S')"
 for (( s=0; s<${{#dirs[@]}}; s+=concurrent )); do
+    echo "[dispatch] batch starting at dir index $s ($(date '+%H:%M:%S'))"
     for (( i=s; i<s+concurrent && i<${{#dirs[@]}}; i++ )); do
         bash "${{dirs[i]}}/run_vasp.sh" &
     done
     wait
+    echo "[dispatch] batch at index $s done ($(date '+%H:%M:%S'))"
 done
 
 for d in {glob}; do

@@ -26,16 +26,22 @@ module load gpu PrgEnv-nvidia cray-hdf5 cray-fftw nccl/2.18.3-cu12 vasp/6.4.3-gp
 : "${MAX_RETRIES:=10}"
 run_until_complete() {
     local step="$1" tries=0
+    echo "=== [run_until_complete] checking $step at $(date '+%H:%M:%S') ==="
     until bash "$step" --check; do
         if (( tries >= MAX_RETRIES )); then
             echo "FATAL: $step did not complete after $MAX_RETRIES attempts" >&2
             exit 1
         fi
         tries=$(( tries + 1 ))
-        echo "=== running $step (attempt $tries) ==="
-        bash "$step" || { echo "$step exited nonzero; retrying in 60s"; sleep 60; }
+        echo "=== running $step (attempt $tries) at $(date '+%H:%M:%S') ==="
+        bash "$step"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            echo "=== $step exited $rc at $(date '+%H:%M:%S'); retrying in 60s ==="
+            sleep 60
+        fi
     done
-    echo "=== $step complete ==="
+    echo "=== $step complete at $(date '+%H:%M:%S') ==="
 }
 
 # ── resume_contcar ──  crash/requeue resume: continue from the checkpoint
