@@ -207,7 +207,6 @@ def build_bake(cfg, cpu_flag, home_output_dir):
         "SBATCH_RELAX": mode_cfg.get("sbatch_relax", "") or mode_cfg.get("sbatch", ""),
         "SBATCH_MAIN": mode_cfg.get("sbatch", ""),
         "SBATCH_POST": mode_cfg.get("sbatch_post", "") or mode_cfg.get("sbatch", ""),
-        "MAX_RESTARTS": cfg.get("vasp_loop", {}).get("max_restarts", 3),
         "START_FROM_SUPERCELL": cfg.get("start_from_supercell", False),
         "HOME_OUTPUT_DIR": home_output_dir or "",
         # kpoints per step
@@ -288,9 +287,7 @@ def emit_relax(cfg, b, step, dst_dir, debug):
 
     post_success = ""
     if is_defect1:
-        post_success = (
-            "        cp CONTCAR CONTCAR_ISIF2; cp OUTCAR OUTCAR_ISIF2; cp OSZICAR OSZICAR_ISIF2\n"
-        )
+        post_success = "    cp CONTCAR CONTCAR_ISIF2; cp OUTCAR OUTCAR_ISIF2; cp OSZICAR OSZICAR_ISIF2\n"
 
     s = _header()
     s += f"""
@@ -312,26 +309,21 @@ cp ../input/POTCAR POTCAR 2>/dev/null || true
 done
 echo "[{step}] INCAR/KPOINTS present, resuming from checkpoint if any"
 resume_contcar
-echo "[{step}] entering relax loop (max {b['MAX_RESTARTS']} attempts)"
 
-for attempt in $(seq 1 {b['MAX_RESTARTS']}); do
-    echo "[{step}] attempt $attempt: launching srun at $(date '+%H:%M:%S')"
-    rm -f OUTCAR
-    srun {b['SRUN_RELAX']} {b['VASP_BINARY']}{dryrun} 2>&1 | tee relaxation.stdout
-    srun_rc=${{PIPESTATUS[0]}}
-    echo "[{step}] attempt $attempt: srun exited $srun_rc at $(date '+%H:%M:%S')"
-    if [ "$srun_rc" -ne 0 ]; then
-        echo "[{step}] FATAL: srun exited $srun_rc on attempt $attempt" >&2
-        exit 1
-    fi
-    if python3 {CHECK_CONV} --relax . >/dev/null 2>&1; then
-{post_success}        echo "[{step}] converged on attempt $attempt"
-        exit 0
-    fi
-    echo "[{step}] attempt $attempt: not yet converged, will retry"
-    resume_contcar
-done
-echo "[{step}] FATAL: not converged after {b['MAX_RESTARTS']} attempts" >&2
+echo "[{step}] launching srun at $(date '+%H:%M:%S')"
+rm -f OUTCAR
+srun {b['SRUN_RELAX']} {b['VASP_BINARY']}{dryrun} 2>&1 | tee relaxation.stdout
+srun_rc=${{PIPESTATUS[0]}}
+echo "[{step}] srun exited $srun_rc at $(date '+%H:%M:%S')"
+if [ "$srun_rc" -ne 0 ]; then
+    echo "[{step}] FATAL: srun exited $srun_rc" >&2
+    exit 1
+fi
+if python3 {CHECK_CONV} --relax . >/dev/null 2>&1; then
+{post_success}    echo "[{step}] converged"
+    exit 0
+fi
+echo "[{step}] FATAL: not converged" >&2
 exit 1
 """
     return s

@@ -18,29 +18,18 @@ conda activate /global/common/software/m526/phonopy_env
 module load gpu PrgEnv-nvidia cray-hdf5 cray-fftw nccl/2.18.3-cu12 vasp/6.4.3-gpu
 
 # ── run_until_complete <step-script> ────────────────────────────────────────
-# The entire "orchestration". A step reports done via `bash step.sh --check`
-# (exit 0). If not done, run it; if the run exits nonzero, wait and retry.
-# A hard cap (MAX_RETRIES) prevents an infinite loop on a genuinely broken step
-# — it aborts loudly instead. Under Slurm --requeue a preempted step is simply
-# re-run on its next turn and resumes from its own checkpoint (idempotent).
-: "${MAX_RETRIES:=10}"
+# Run a step once unless it's already done (`step.sh --check` exit 0). No
+# in-process retry -- a step either passes --check after running or this
+# aborts loudly. The only retry left anywhere in the pipeline is the outer
+# per-phase resubmit in run_all.sh, for a Slurm wall-time TIMEOUT killing the
+# whole allocation; that's the one case a step-local retry can't cover at all.
 run_until_complete() {
-    local step="$1" tries=0
+    local step="$1"
     echo "=== [run_until_complete] checking $step at $(date '+%H:%M:%S') ==="
-    until bash "$step" --check; do
-        if (( tries >= MAX_RETRIES )); then
-            echo "FATAL: $step did not complete after $MAX_RETRIES attempts" >&2
-            exit 1
-        fi
-        tries=$(( tries + 1 ))
-        echo "=== running $step (attempt $tries) at $(date '+%H:%M:%S') ==="
-        bash "$step"
-        rc=$?
-        if [ "$rc" -ne 0 ]; then
-            echo "=== $step exited $rc at $(date '+%H:%M:%S'); retrying in 60s ==="
-            sleep 60
-        fi
-    done
+    bash "$step" --check && { echo "=== $step already complete ==="; return 0; }
+    echo "=== running $step at $(date '+%H:%M:%S') ==="
+    bash "$step"
+    bash "$step" --check || { echo "FATAL: $step did not complete" >&2; exit 1; }
     echo "=== $step complete at $(date '+%H:%M:%S') ==="
 }
 
