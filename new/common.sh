@@ -39,4 +39,7 @@ run_until_complete() {
 }
 
 # ── resume_contcar ──  crash/requeue resume: continue from the checkpoint
-resume_contcar() { [ -s CONTCAR ] && cp CONTCAR POSCAR; }
+# `set -e` treats a bare "[ cond ] && cmd" as the function's exit status, so
+# when the file is absent (the common no-op case) an unguarded call kills the
+# calling script instantly and silently. `|| true` neutralizes that.
+resume_contcar() { [ -s CONTCAR ] && cp CONTCAR POSCAR || true; }

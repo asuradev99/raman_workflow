@@ -381,7 +381,9 @@ case "${{1:-}}" in
   --check)   compgen -G "hf_POSCAR-*" >/dev/null && exit 0 || exit 1 ;;
   --restart) rm -rf hf_POSCAR-* SPOSCAR POSCAR-* phonopy_disp.yaml groundstate; exit 0 ;;
 esac
-compgen -G "hf_POSCAR-*" >/dev/null && {{ echo "[hf_setup] already complete"; exit 0; }}
+if compgen -G "hf_POSCAR-*" >/dev/null; then
+    echo "[hf_setup] already complete"; exit 0
+fi
 
 relax_dir=../scf
 cp "$relax_dir/CONTCAR" POSCAR_unitcell
@@ -457,12 +459,18 @@ case "${{1:-}}" in
   --check)   [ -s band.yaml ] && [ -s FORCE_SETS ] && exit 0 || exit 1 ;;
   --restart) rm -f FORCE_SETS band.yaml irreps.yaml eigenvectors.yaml mesh.yaml; rm -rf VESTA_MODES; exit 0 ;;
 esac
-[ -s band.yaml ] && [ -s FORCE_SETS ] && {{ echo "[phonon_post] already complete"; exit 0; }}
+if [ -s band.yaml ] && [ -s FORCE_SETS ]; then
+    echo "[phonon_post] already complete"; exit 0
+fi
 
 mapfile -t vaspruns < <(ls hf_POSCAR-*/vasprun.xml 2>/dev/null | sort)
-(( ${{#vaspruns[@]}} == 0 )) && {{ echo "[phonon_post] FATAL: no vasprun.xml" >&2; exit 1; }}
+if (( ${{#vaspruns[@]}} == 0 )); then
+    echo "[phonon_post] FATAL: no vasprun.xml" >&2; exit 1
+fi
 ndirs=$(ls -d hf_POSCAR-* | wc -l)
-(( ${{#vaspruns[@]}} < ndirs )) && echo "[phonon_post] WARNING: ${{#vaspruns[@]}}/${{ndirs}} vasprun.xml present"
+if (( ${{#vaspruns[@]}} < ndirs )); then
+    echo "[phonon_post] WARNING: ${{#vaspruns[@]}}/${{ndirs}} vasprun.xml present"
+fi
 
 phonopy -f "${{vaspruns[@]}}"
 for f in eigenvectors.conf symmetry.conf; do
@@ -545,7 +553,9 @@ case "${{1:-}}" in
   --check)   [ -s "$DONE" ] && exit 0 || exit 1 ;;
   --restart) rm -rf store_ramfile store_epsilon AXML ./*eV ../output; exit 0 ;;
 esac
-[ -s "$DONE" ] && {{ echo "[post_process] already complete"; exit 0; }}
+if [ -s "$DONE" ]; then
+    echo "[post_process] already complete"; exit 0
+fi
 
 # Kopia: cp vasprun.xml -> AXML/
 mkdir -p AXML
