@@ -572,6 +572,13 @@ n=$(ls AXML/*.xml 2>/dev/null | wc -l); e=$(find AXML -name '*.xml' -empty | wc 
 (( n == 0 )) && {{ echo "[post] FATAL: no XML in AXML" >&2; exit 1; }}
 (( e > 0 )) && {{ echo "[post] FATAL: $e empty XML" >&2; exit 1; }}
 
+# genRAram610_dynamic reads band.yaml/irreps.yaml from its own cwd (this dir),
+# not ../hf where phonon_post actually wrote them -- copy them in first.
+for f in band.yaml irreps.yaml; do
+    [ -s "../hf/$f" ] && cp "../hf/$f" .
+done
+[ -s band.yaml ] || {{ echo "[post] FATAL: band.yaml missing/empty — phonon_post did not complete" >&2; exit 1; }}
+
 # RAMFILE per energy
 export PATH="$BIN:$PATH"; mkdir -p store_ramfile store_epsilon
 for eV in {energies}; do
