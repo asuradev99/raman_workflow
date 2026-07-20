@@ -1,0 +1,62 @@
+use_gam: true
+cpu:
+  enabled: true
+  omp:
+    enabled: true
+phonopy:
+  dim: "1 1 1"
+start_from_supercell: true
+compute_mode: "sbatch_mix"
+
+system_paths:
+  vasp_modules: "vasp-tpc/6.4.2-cpu"
+
+compute_modes:
+  sbatch_mix:
+    sbatch_relax: "--nodes=4 --ntasks-per-node=32 --cpus-per-task=8 --time=01:00:00 --qos=regular --constraint=cpu -A m526"
+    srun_relax: "--nodes=4 --ntasks-per-node=32 --cpus-per-task=8 --cpu_bind=cores --export=ALL"
+    sbatch: "--nodes=256 --ntasks-per-node=32 --cpus-per-task=8 --time=05:30:00 --qos=regular --constraint=cpu -A m526"
+    srun_per_dir: "--nodes=1 --ntasks-per-node=32 --cpus-per-task=8 --cpu_bind=cores --export=ALL"
+    gpus_per_dir: 1
+    salloc_post: "--nodes=1 --time=00:30:00 --qos=interactive --constraint=cpu -A m526"
+  interactive_serial:
+    salloc: "-N 4 -C cpu -t 04:00:00 --qos=interactive -A m526"
+    srun_relax: "--nodes=4 --ntasks-per-node=32 --cpus-per-task=8 --cpu_bind=cores --export=ALL"
+
+steps:
+  defect_relax_1:
+    kpoints: {mesh: "1 1 1"}
+    incar_overrides: |
+      NELECT = 646
+      GGA = PS
+      ENCUT = 400
+      KPAR = 1
+      NPAR = 1
+      MAGMOM = 161*1
+  hf_setup: {}
+  force_consts:
+    kpoints: {mesh: "1 1 1"}
+    incar_overrides: |
+      NELECT = 646
+      GGA = PS
+      ENCUT = 400
+      KPAR = 1
+      NPAR = 1
+      MAGMOM = 161*1
+  phonon_post: {}
+  raman_prep: {}
+  resonant_vasp:
+    kpoints: {mesh: "1 1 1"}
+    incar_overrides: |
+      ENCUT = 400
+      NELECT = 646
+      GGA = PS
+      NBANDS = 968
+      KPAR = 1
+      NPAR = 1
+      MAGMOM = 161*1
+  post_process:
+    desired_energies:
+      - "0.00"
+      - "1.96"
+      - "2.33"

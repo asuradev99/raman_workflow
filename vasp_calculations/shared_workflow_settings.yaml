@@ -1,0 +1,283 @@
+# =============================================================================
+# Shared Workflow Settings — inherited by all per-material configs
+# =============================================================================
+# The shared file provides the
+# default INCAR templates which are applied across all simulations by default, 
+# except if overrided in the specific simulation settings
+#
+# Loading order:
+#   1. This shared file              ← base layer (templates + global defaults)
+#   2. Per-material workflow_settings.yaml ← overrides + step selection
+# =============================================================================
+
+_description: "Shared computational settings for all hBN Raman simulations"
+_version: "2026-06-26"
+
+# ── Material identity ─────────────────────────────────────────────────────────
+material: "Hexagonal Boron Nitride"
+
+# ── Compute mode: how the pipeline provisions resources
+#   interactive_manual  — user provides salloc (default)
+#   interactive_serial  — auto-salloc, auto-retry
+#   sbatch_serial       — single sbatch runs entire pipeline
+#   sbatch_parallel     — salloc for early steps, sbatch per-dir for HF/Raman
+#   sbatch_mix          — one large sbatch; HF/Raman dirs run concurrently
+# compute_mode: "interactive_serial"
+
+# ── System paths — HPC-specific binaries, modules, and environment ───────────
+system_paths:
+  conda_init: "/global/common/software/m3035/conda/etc/profile.d/conda.sh"
+  conda_env: "/global/common/software/m526/phonopy_env"
+  vasp_modules: "gpu PrgEnv-nvidia cray-hdf5 cray-fftw nccl/2.18.3-cu12 vasp/6.4.3-gpu"
+  vasp_binary: "/global/cfs/cdirs/m526/liangbo/bin/gpu/vasp_std"
+  vasp_binary_cpu: "/global/cfs/cdirs/m526/liangbo/bin/cpu/vasp_std"
+  # Gamma-only binaries (real-arithmetic) -- selected via `use_gam: true`
+  # instead of vasp_binary/vasp_binary_cpu above. See automation_raman_analysis.py.
+  vasp_binary_gam: "/global/cfs/cdirs/m526/liangbo/bin/gpu/vasp_gam"
+  vasp_binary_gam_cpu: "/global/cfs/cdirs/m526/liangbo/bin/cpu/vasp_gam"
+  binary_utilities_dir: "/global/cfs/cdirs/m526/vasp_binaries/binary_utility"
+  spectroPy_dir: "/global/homes/e/easuresh/SpectroPy"
+
+cpu:
+  omp:
+    num_threads: 4
+    places: "threads"
+    proc_bind: "spread"
+
+# ── Phonopy settings ─────────────────────────────────────────────────────────
+phonopy:
+  amplitude: 0.03
+
+# ── VASP loop restart ────────────────────────────────────────────────────────
+#Retry vasp if fails to converge, up to max_restarts times. Each restart will use the
+#same INCAR/KPOINTS/POTCAR as the original run but copy the CONTCAR to POSCAR 
+# and WAVECAR to restart the calculation.
+vasp_loop:
+  max_restarts: 3
+
+# ── Per-step VASP settings ────────────────────────────────────────────────────
+# Keys define all possible steps and their default INCAR templates + kpoints.
+# with optional kpoints/incar_overrides that deep-merge into these defaults.
+steps:
+  #Main relaxation step with ISIF=2 (atomic positions only, lattice fixed)
+  defect_relax_1:
+    kpoints: {mesh: "3 3 1", shift: "0 0 0"}
+    incar: |
+      System = hBN defect supercell - ISIF=2 atomic relaxation (lattice fixed)
+      ISTART = 1
+      ICHARG = 1
+      PREC = Accurate
+      ENCUT = 400
+      ADDGRID = .TRUE.
+      ALGO = Fast
+      EDIFF = 1E-08
+      NELM = 100
+      EDIFFG = -0.001
+      NSW = 200
+      IBRION = 2
+      ISIF = 2
+      POTIM = 0.1
+      ISMEAR = 0
+      SIGMA = 0.01
+      LCHARG = .TRUE.
+      LWAVE = .TRUE.
+      GGA = PS
+      ISPIN = 2
+      LORBIT = 11
+    
+  hf_setup: {}
+  # No VASP params — hf_setup writes INCAR/KPOINTS from force_consts config.
+
+  # Main force constant displacement calculation step (force constants)
+  force_consts:
+    kpoints: {mesh: "3 3 1", shift: "0 0 0"}
+    incar: |
+      System = hexagonal Boron Nitride - harmonic force constant calculation
+      ISTART = 1
+      ICHARG = 1
+      PREC = Accurate
+      ENCUT = 400
+      ADDGRID = .TRUE.
+      ALGO = Fast
+      EDIFF = 1E-08
+      NELM = 100
+      NSW = 0
+      ISMEAR = 0
+      SIGMA = 0.01
+      LCHARG= .FALSE.
+      LWAVE =.FALSE.
+      GGA = PS
+      ISPIN = 2
+      LORBIT = 11
+  # phonopy post processing and mode visualization with VESTA
+  phonon_post:
+    eigenvectors_band:
+      path: "0.0 0.0 0.0  0.0 0.0 0.0"
+      labels: "GAMMA GAMMA"
+      points: 1
+    visualization:
+      enabled: true
+      scale_factor: 25.0
+      output_format: "vesta"
+      vesta_template: "template.vesta"
+
+  #prep for raman tensor calculation (writes INCAR/KPOINTS from resonant_vasp config)
+  raman_prep: {}
+  # No VASP params — raman_prep writes INCAR/KPOINTS from resonant_vasp config.
+
+  # Main raman computation step (resonant_vasp) — computes Raman tensor and dielectric function
+  resonant_vasp:
+    kpoints: {mesh: "3 3 1", shift: "0 0 0"}
+    incar: |
+      System = hexagonal Boron Nitride - dielectric Raman tensor calculation
+      ISTART = 1
+      ICHARG = 1
+      PREC = Accurate
+      ENCUT = 400
+      ADDGRID = .TRUE.
+      ALGO = Fast
+      EDIFF = 1E-08
+      NELM = 100
+      NSW = 0
+      ISMEAR = 0
+      SIGMA = 0.01
+      LCHARG= .FALSE.
+      LWAVE =.FALSE.
+      NEDOS = 50001
+      OMEGAMAX = 50
+      LOPTICS = .TRUE.
+      GGA = PS
+      ISYM = -1
+      ISPIN = 2
+  # post process of Raman tensor step
+  post_process:
+    broadening:
+      mode: 2
+      hwhm: 1
+      interpolation: 200
+      normalization: 2
+    raman_tensor:
+      incident_polarization:  "1.0 0.0 0.0"
+      scattered_polarization: "1.0 0.0 0.0"
+      surface_normal: "z"
+    desired_energies:
+      - "0.00"
+      - "1.96"
+      - "2.33"
+
+  # Default INCAR templates for steps not used by defect materials —
+  # still active for pristine hBN calculations (interactive_serial mode).
+  scf_relax:
+    kpoints: {mesh: "3 3 1", shift: "0 0 0"}
+    incar: |
+      System = hexagonal Boron Nitride - initial primitive unit cell relaxation
+      ISTART = 1
+      ICHARG = 1
+      PREC = Accurate
+      ENCUT = 400
+      ADDGRID = .TRUE.
+      ALGO = Fast
+      EDIFF = 1E-08
+      NELM = 100
+      EDIFFG = -0.001
+      NSW = 200
+      IBRION = 2
+      ISIF = 3
+      POTIM = 0.1
+      LATTICE_CONSTRAINTS = .TRUE. .TRUE. .FALSE.
+      ISMEAR = 0
+      SIGMA = 0.01
+      LCHARG= .TRUE.
+      LWAVE =.TRUE.
+      NPAR = 1
+      KPAR = 3
+      GGA = PS
+
+  defect_relax_2:
+    kpoints: {mesh: "3 3 1", shift: "0 0 0"}
+    incar: |
+      System = hBN defect supercell - ISIF=4 full relaxation (from ISIF=2 positions)
+      ISTART = 1
+      ICHARG = 1
+      PREC = Accurate
+      ENCUT = 400
+      ADDGRID = .TRUE.
+      ALGO = Fast
+      EDIFF = 1E-08
+      NELM = 100
+      EDIFFG = -0.001
+      NSW = 200
+      IBRION = 2
+      ISIF = 4
+      POTIM = 0.1
+      ISMEAR = 0
+      SIGMA = 0.01
+      LCHARG = .TRUE.
+      LWAVE = .TRUE.
+      NPAR = 1
+      KPAR = 3
+      GGA = PS
+
+  defect_relax_2_cpu:
+    kpoints: {mesh: "3 3 1", shift: "0 0 0"}
+    incar: |
+      System = hBN defect supercell - ISIF=4 full relaxation (CPU, from ISIF=2 positions)
+      ISTART = 1
+      ICHARG = 1
+      PREC = Accurate
+      ENCUT = 400
+      ADDGRID = .TRUE.
+      ALGO = Fast
+      EDIFF = 1E-08
+      NELM = 100
+      EDIFFG = -0.001
+      NSW = 200
+      IBRION = 2
+      ISIF = 4
+      POTIM = 0.1
+      ISMEAR = 0
+      SIGMA = 0.01
+      LCHARG = .TRUE.
+      LWAVE = .TRUE.
+      NPAR = 1
+      KPAR = 3
+      GGA = PS
+    cpu_relax:
+      vasp_binary: "/global/cfs/cdirs/m526/liangbo/bin/cpu/vasp_std"
+      vasp_modules: "vasp-tpc/6.4.2-cpu"
+      omp_env:
+        OMP_NUM_THREADS: "4"
+        OMP_PLACES: "threads"
+        OMP_PROC_BIND: "spread"
+
+  supercell:
+    kpoints: {mesh: "3 3 1", shift: "0 0 0"}
+    incar: |
+      System = hexagonal Boron Nitride - supercell ionic relaxation
+      ISTART = 1
+      ICHARG = 1
+      PREC = Accurate
+      ENCUT = 400
+      ADDGRID = .TRUE.
+      ALGO = Fast
+      EDIFF = 1E-08
+      NELM = 100
+      EDIFFG = -0.001
+      NSW = 200
+      IBRION = 2
+      ISIF = 2
+      POTIM = 0.1
+      ISMEAR = 0
+      SIGMA = 0.01
+      LCHARG= .TRUE.
+      LWAVE =.TRUE.
+      NPAR = 1
+      KPAR = 3
+      GGA = PS
+# =============================================================================
+# Removed from resonant_vasp.incar (redundant with NSW = 0 — no ionic steps):
+#   EDIFFG = -0.001   (force convergence criterion — only checked when NSW > 0)
+#   IBRION = 2        (ionic relaxation algorithm — inactive when NSW = 0)
+#   ISIF = 4          (stress/lattice relaxation control — inactive when NSW = 0)
+#   POTIM = 0.1       (ionic step size — inactive when NSW = 0)
+# =============================================================================

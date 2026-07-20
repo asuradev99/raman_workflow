@@ -1,0 +1,25 @@
+NELECT = 646
+GGA = PS
+ENCUT = 400
+KPAR = 1
+NPAR = 32
+MAGMOM = 161*1
+System = hBN defect supercell - ISIF=2 atomic relaxation (lattice fixed)
+ISTART = 1
+ICHARG = 1
+PREC = Accurate
+ADDGRID = .TRUE.
+ALGO = Fast
+EDIFF = 1E-08
+NELM = 100
+EDIFFG = -0.001
+NSW = 200
+IBRION = 2
+ISIF = 2
+POTIM = 0.1
+ISMEAR = 0
+SIGMA = 0.01
+LCHARG = .TRUE.
+LWAVE = .TRUE.
+ISPIN = 2
+LORBIT = 11

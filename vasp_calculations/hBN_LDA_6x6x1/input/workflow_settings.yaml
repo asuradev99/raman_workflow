@@ -1,0 +1,26 @@
+# hBN 6x6x1 — LDA functional
+# run_raman_pipeline_auto hBN_LDA_6x6x1
+
+phonopy:
+  dim: "6 6 1"
+compute_mode: "interactive_serial"
+
+compute_modes:
+  interactive_serial:
+    srun_relax: "--cpu_bind=cores --gpus-per-node=3 --ntasks-per-node=3 --nodes=4 --cpus-per-task=32 -C gpu"
+    srun_cpu_relax: "--cpu_bind=cores --nodes=4 --ntasks-per-node=16 --cpus-per-task=4"
+    salloc: "-N 4 -C gpu --gpus-per-node=3 -t 04:00:00 --qos=interactive -A m526"
+
+steps:
+  scf_relax:
+    kpoints: {mesh: "24 24 1"}
+  supercell:
+    kpoints: {mesh: "4 4 1"}
+  hf_setup: {}
+  force_consts:
+    kpoints: {mesh: "4 4 1"}
+  phonon_post: {}
+  raman_prep: {}
+  resonant_vasp:
+    kpoints: {mesh: "24 24 1"}
+  post_process: {}

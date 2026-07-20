@@ -1,0 +1,525 @@
+
+VASP binary found: /global/cfs/cdirs/m526/liangbo/bin/gpu/vasp_std
+Binary utilities directory found: /global/cfs/cdirs/m526/vasp_binaries/binary_utility
+Loaded fallback config from /global/homes/e/easuresh/raman_workflow/workflow_settings.yaml
+Loaded shared config from /global/homes/e/easuresh/vasp_calculations/shared_workflow_settings.yaml
+Loaded per-material config from /global/homes/e/easuresh/vasp_calculations/hBN_LDA/input/workflow_settings.yaml
+  [scratch] WORK_DIR = /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA
+  [scratch] input/ will be symlinked from HOME (not copied)
+
+══════════════════════════════════════════════════════════════════════════════
+  RAMAN PIPELINE START
+══════════════════════════════════════════════════════════════════════════════
+  Date      : 2026-06-09 08:17:38 PDT
+  Host      : nid001172
+  Material  : Hexagonal Boron Nitride  (hBN_LDA)
+  Work dir  : /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA
+  Log file  : /global/homes/e/easuresh/vasp_calculations/hBN_LDA/workflow.log
+  Flags     : scratch=on  restart=on  cpu=off
+  Command   : python /global/homes/e/easuresh/raman_workflow/automation_raman_analysis.py
+══════════════════════════════════════════════════════════════════════════════
+
+Starting Raman automation for Hexagonal Boron Nitride (hBN_LDA) in /global/homes/e/easuresh/vasp_calculations/hBN_LDA
+Current working directory: /global/u1/e/easuresh/vasp_calculations/hBN_LDA
+[resume] No status table found in /global/homes/e/easuresh/vasp_calculations/hBN_LDA/workflow.log. Starting from step 3.
+[resume] START_STEP = 3 — starting pipeline execution.
+
+  [scratch] Linking input/ from HOME to SCRATCH...
+  [scratch] Source: /global/homes/e/easuresh/vasp_calculations/hBN_LDA/input
+  [scratch] Target: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/input (symlink)
+
+--- Running: mkdir -p /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- In directory: /global/homes/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+  [scratch] Symlink created. VASP stages will run in: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA
+
+╔══════════════════════════════════════════════════════════════════╗
+║  STEP 3 — Initial VASP relaxation                                ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+--- Running: mkdir -p /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/scf ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+
+--- Running: cp input/POSCAR scf/POSCAR ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+
+--- Running: cp input/POTCAR scf/POTCAR ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+  [setup] Wrote unit cell KPOINTS (24 24 1) to scf/
+
+  [relax] Attempt 1/3...
+
+--- Running: srun --cpu_bind=cores --gpus-per-node=4 --ntasks-per-node=4 --nodes=1 --cpus-per-task=32 -C gpu /global/cfs/cdirs/m526/liangbo/bin/gpu/vasp_std > relaxation.stdout ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/scf ---
+--- Command completed successfully ---
+  [vasp:step-3] ZBRENT error after convergence (max |F| = 0.000000 eV/Å) — restarting from CONTCAR so VASP writes I/O files cleanly.
+
+  [relax] Attempt 2/3...
+
+--- Running: srun --cpu_bind=cores --gpus-per-node=4 --ntasks-per-node=4 --nodes=1 --cpus-per-task=32 -C gpu /global/cfs/cdirs/m526/liangbo/bin/gpu/vasp_std > relaxation.stdout ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/scf ---
+--- Command completed successfully ---
+  [vasp:step-3] ZBRENT error after convergence (max |F| = 0.000000 eV/Å) — restarting from CONTCAR so VASP writes I/O files cleanly.
+
+  [relax] Attempt 3/3...
+
+--- Running: srun --cpu_bind=cores --gpus-per-node=4 --ntasks-per-node=4 --nodes=1 --cpus-per-task=32 -C gpu /global/cfs/cdirs/m526/liangbo/bin/gpu/vasp_std > relaxation.stdout ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/scf ---
+--- Command completed successfully ---
+  [vasp:step-3] VASP converged: max |F| = 0.000000 eV/Å ≤ EDIFFG = 0.001 after 200/200 step(s) (worst atom: atom_1)
+  [vasp:step-3] Per-atom residual forces (eV/Å):
+  [vasp:step-3]       Atom          Fx          Fy          Fz         |F|
+  [vasp:step-3]   ───────────────────────────────────────────────────────
+  [vasp:step-3]     atom_1    0.000000   -0.000000    0.000000    0.000000 ← MAX
+  [vasp:step-3]     atom_2   -0.000000    0.000000    0.000000    0.000000
+  [vasp:step-3] Relaxation succeeded on attempt 3.
+
+  ✓ STEP 3 COMPLETE — Initial VASP relaxation (13m 31s)
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  STEP 4 — Supercell generation + ionic relaxation                ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+--- Running: mkdir -p /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/groundstate ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+  [setup] Creating supercell in hf/ via phonopy (shared with force-constant step)...
+
+--- Running: cp scf/CONTCAR /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/POSCAR_unitcell ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+
+--- Running: phonopy -d --dim="6 6 1" --amplitude=0.03 -c POSCAR_unitcell ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf ---
+--- Command completed successfully ---
+
+--- Running: cp SPOSCAR /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/groundstate/POSCAR ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf ---
+--- Command completed successfully ---
+  [setup] POSCAR-* displacement files + SPOSCAR now in hf/ — Step 6 will reuse them
+  [vasp] Setting up supercell ionic relaxation (NSW=100, ISIF=3, 2D-constrained)...
+  [setup] Wrote supercell KPOINTS (4 4 1) to hf/groundstate/
+
+--- Running: cp input/POTCAR /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/groundstate/ ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+  [vasp] Running supercell ionic relaxation...
+
+--- Running: srun --cpu_bind=cores --gpus-per-node=4 --ntasks-per-node=4 --nodes=1 --cpus-per-task=32 -C gpu /global/cfs/cdirs/m526/liangbo/bin/gpu/vasp_std > supercell_relax.stdout ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/groundstate ---
+--- Command completed successfully ---
+  [vasp:step-4] VASP converged: max |F| = 0.000000 eV/Å ≤ EDIFFG = 0.001 after 1/100 step(s) (worst atom: atom_46)
+  [vasp:step-4] Residual forces — top 5 of 72 atoms (eV/Å):
+  [vasp:step-4]       Atom          Fx          Fy          Fz         |F|
+  [vasp:step-4]   ───────────────────────────────────────────────────────
+  [vasp:step-4]    atom_46    0.000000    0.000000    0.000000    0.000000 ← MAX
+  [vasp:step-4]    atom_45    0.000000    0.000000    0.000000    0.000000
+  [vasp:step-4]    atom_43    0.000000    0.000000    0.000000    0.000000
+  [vasp:step-4]    atom_39   -0.000000    0.000000    0.000000    0.000000
+  [vasp:step-4]    atom_44    0.000000    0.000000   -0.000000    0.000000
+  [vasp:step-4]   ───────────────────────────────────────────────────────
+  [vasp:step-4]   max=0.000000  mean=0.000000  median=0.000000  (72 atoms total)
+  [info] Supercell ionic relaxation: 1 step(s) completed (max NSW=100)
+
+--- Running: cp SPOSCAR /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/CONTCAR_supercell_relaxed ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf ---
+--- Command completed successfully ---
+
+--- Running: cp SPOSCAR /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/CONTCAR ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf ---
+--- Command completed successfully ---
+
+--- Running: cp CONTCAR /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/groundstate/CONTCAR_relaxed ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/groundstate ---
+--- Command completed successfully ---
+
+  ✓ STEP 4 COMPLETE — Supercell generation + ionic relaxation (6m 20s)
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  STEP 5 — Copy files to hf/                                      ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+--- Running: mkdir -p /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+
+--- Running: cp scf/CONTCAR /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/POSCAR_unitcell ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+  [setup] Wrote coarse KPOINTS (4 4 1) to hf/
+
+--- Running: cp input/POTCAR /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/ ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+  [setup] symmetry.conf not found — creating with DIM = 6 6 1 + IRREPS = 0 0 0...
+
+  ✓ STEP 5 COMPLETE — Copy files to hf/ (0s)
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  STEP 6 — Phonopy displacement generation                        ║
+╚══════════════════════════════════════════════════════════════════╝
+
+  [verify] SPOSCAR found in hf/ — reusing supercell displacements from Step 4
+
+  ✓ STEP 6 COMPLETE — Phonopy displacement generation (0s)
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  STEP 7 — Run runHF to organize displacement folders             ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+--- Running: /global/cfs/cdirs/m526/vasp_binaries/binary_utility/runHF ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf ---
+--- Command completed successfully ---
+
+  ✓ STEP 7 COMPLETE — Run runHF to organize displacement folders (0s)
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  STEP 8 — WAVECAR + CHGCAR symlinks (seeding)                    ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+--- Running: cp INCAR /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/groundstate/ ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf ---
+--- Command completed successfully ---
+
+--- Running: cp KPOINTS /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/groundstate/ ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf ---
+--- Command completed successfully ---
+
+--- Running: cp POSCAR_unitcell /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/groundstate/POSCAR ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf ---
+--- Command completed successfully ---
+  Replaced symlinks in 2 displacement dirs:
+    hf_POSCAR-*/WAVECAR → ../groundstate/WAVECAR  (1 hop)
+  Created CHGCAR symlinks in 2 displacement dirs:
+    hf_POSCAR-*/CHGCAR → ../groundstate/CHGCAR  (1 hop)
+
+  ✓ STEP 8 COMPLETE — WAVECAR + CHGCAR symlinks (seeding) (0s)
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  STEP 9 — VASP in all hf_POSCAR folders (force constants)        ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+--- Running VASP iteration 1/3 ---
+  [gpu] Running automate_hfiles_fixed.sh (GPU mode)...
+  [gpu] srun args: --cpu_bind=cores --gpus-per-node=4 --ntasks-per-node=4 --nodes=1 --cpus-per-task=32 -C gpu
+
+--- Running: export SRUN_ARGS='--cpu_bind=cores --gpus-per-node=4 --ntasks-per-node=4 --nodes=1 --cpus-per-task=32 -C gpu' && bash /global/homes/e/easuresh/raman_workflow/automate_hfiles_fixed.sh ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf ---
+--- Command completed successfully ---
+VASP runs completed in all 2 displacement directories.
+
+  ✓ STEP 9 COMPLETE — VASP in all hf_POSCAR folders (force constants) (18m 48s)
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  STEP 10 — Phonon postprocessing                                 ║
+╚══════════════════════════════════════════════════════════════════╝
+
+  [10a] Extracting force constants from VASP runs...
+
+--- Running: phonopy -f hf_POSCAR-{001..002}/vasprun.xml ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf ---
+--- Command completed successfully ---
+  [10b] Running phonopy eigenvectors + visualization + symmetry...
+  [9b] eigenvectors.conf not found — creating...
+
+--- Running: phonopy -c POSCAR_unitcell eigenvectors.conf ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf ---
+--- Command completed successfully ---
+
+--- Running: phonopy -c POSCAR_unitcell symmetry.conf ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf ---
+--- Command completed successfully ---
+  [10c] Gamma-only mode — phonopy_visualization + symmetry skipped (irreps.yaml already has mode irrep labels)
+WARNING: all_mode.txt was not created by phonon postprocessing.
+
+  ✓ STEP 10 COMPLETE — Phonon postprocessing (2s)
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  STEP 11 — Copy CONTCAR to raman dir                             ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+--- Running: mkdir -p /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+
+--- Running: cp scf/CONTCAR /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman/CONTCAR ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+  [setup] Symlinked CHGCAR from scf/ → raman/
+  [setup] Symlinked WAVECAR from scf/ → raman/
+  [setup] Wrote Raman KPOINTS (24 24 1) to raman/
+
+--- Running: cp input/POTCAR /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman/ ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+  [setup] Copied CONTCAR + INCAR (from YAML config), POTCAR (from input/) to RAMAN_DIR.
+  [setup] KPOINTS generated from config raman_kpoints.mesh=24 24 1.
+
+  ✓ STEP 11 COMPLETE — Copy CONTCAR to raman dir (0s)
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  STEP 12 — Navigate to Raman dir                                 ║
+╚══════════════════════════════════════════════════════════════════╝
+
+Working directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman
+
+  ✓ STEP 12 COMPLETE — Navigate to Raman dir
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  STEP 13 — Generate Raman displacements and organize             ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+--- Running: /global/cfs/cdirs/m526/vasp_binaries/binary_utility/ramdiscar ---
+--- Command completed successfully ---
+
+--- Running: /global/cfs/cdirs/m526/vasp_binaries/binary_utility/genRApos610 < /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman/.go_input ---
+--- Command completed successfully ---
+
+--- Running: /global/cfs/cdirs/m526/vasp_binaries/binary_utility/runRA ---
+--- Command completed successfully ---
+  [setup] Propagating CHGCAR + WAVECAR symlinks into each ra_pos_* directory...
+  [setup] Created 24 symlinks across 12 ra_pos_* directories
+
+  ✓ STEP 13 COMPLETE — Generate Raman displacements and organize (1s)
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  STEP 14 — Run resonant Raman calculations (VASP)                ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+--- Running: export SRUN_ARGS='--cpu_bind=cores --gpus-per-node=4 --ntasks-per-node=4 --nodes=1 --cpus-per-task=32 -C gpu' && bash /global/homes/e/easuresh/raman_workflow/run_all_vasp_folders_fixed.sh ---
+--- Command completed successfully ---
+  [vasp:step-14] VASP static run complete (1 step)
+  [vasp:step-14] Dielectric tensor OK: shape (3, 3, 50001), max |Im(ε)| = 1.7897
+  [vasp:step-14] VASP static run complete (1 step)
+  [vasp:step-14] Dielectric tensor OK: shape (3, 3, 50001), max |Im(ε)| = 1.7897
+  [vasp:step-14] VASP static run complete (1 step)
+  [vasp:step-14] Dielectric tensor OK: shape (3, 3, 50001), max |Im(ε)| = 1.8808
+  [vasp:step-14] VASP static run complete (1 step)
+  [vasp:step-14] Dielectric tensor OK: shape (3, 3, 50001), max |Im(ε)| = 1.8413
+  [vasp:step-14] VASP static run complete (1 step)
+  [vasp:step-14] Dielectric tensor OK: shape (3, 3, 50001), max |Im(ε)| = 1.8598
+  [vasp:step-14] VASP static run complete (1 step)
+  [vasp:step-14] Dielectric tensor OK: shape (3, 3, 50001), max |Im(ε)| = 1.8598
+  [vasp:step-14] VASP static run complete (1 step)
+  [vasp:step-14] Dielectric tensor OK: shape (3, 3, 50001), max |Im(ε)| = 1.7897
+  [vasp:step-14] VASP static run complete (1 step)
+  [vasp:step-14] Dielectric tensor OK: shape (3, 3, 50001), max |Im(ε)| = 1.7897
+  [vasp:step-14] VASP static run complete (1 step)
+  [vasp:step-14] Dielectric tensor OK: shape (3, 3, 50001), max |Im(ε)| = 1.8413
+  [vasp:step-14] VASP static run complete (1 step)
+  [vasp:step-14] Dielectric tensor OK: shape (3, 3, 50001), max |Im(ε)| = 1.8808
+  [vasp:step-14] VASP static run complete (1 step)
+  [vasp:step-14] Dielectric tensor OK: shape (3, 3, 50001), max |Im(ε)| = 1.8598
+  [vasp:step-14] VASP static run complete (1 step)
+  [vasp:step-14] Dielectric tensor OK: shape (3, 3, 50001), max |Im(ε)| = 1.8598
+
+  ✓ STEP 14 COMPLETE — Run resonant Raman calculations (VASP) (34m 16s) — 12 directories
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  STEP 15 — Kopia post-processing                                 ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+--- Running: chmod +x kopia && ./kopia ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman ---
+--- Command completed successfully ---
+  [verify] AXML/ contains 12 valid XML files
+
+  ✓ STEP 15 COMPLETE — Kopia post-processing (1s) — 12 XML files
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  STEP 16 — Generate RAMFILE for each desired energy              ║
+╚══════════════════════════════════════════════════════════════════╝
+
+  [setup] Generated ramfile_dynamic.sh with energies: "1.96" "2.33"
+
+--- Running: export PATH=/global/cfs/cdirs/m526/vasp_binaries/binary_utility:$PATH && bash ramfile_dynamic.sh ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman ---
+--- Command completed successfully ---
+
+  ✓ STEP 16 COMPLETE — Generate RAMFILE for each desired energy (10s) — 2 energies
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  STEP 17 — Copy static Band/Irreps files to Raman dir            ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+--- Running: cp /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/band.yaml . ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman ---
+--- Command completed successfully ---
+
+--- Running: cp /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/irreps.yaml . ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman ---
+--- Command completed successfully ---
+
+--- Running: mkdir -p /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/output ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+
+--- Running: cp /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/band.yaml /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/output/ ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+
+--- Running: cp /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/irreps.yaml /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/output/ ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+
+--- Running: cp /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/POSCAR_unitcell /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/output/ ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+
+--- Running: cp /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/SPOSCAR /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/output/ ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+
+--- Running: cp /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/FORCE_SETS /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/output/ ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+
+--- Running: cp /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/phonopy.yaml /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/output/ ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+
+--- Running: cp /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/CONTCAR /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/output/ ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+
+--- Running: cp /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/eigenvectors.conf /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/output/ ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+
+--- Running: cp /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/hf/symmetry.conf /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/output/ ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+
+--- Running: mkdir -p /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/output/incar ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+  [output] incar/relax.incar
+  [output] incar/supercell_relax.incar
+  [output] incar/hf_force_constants.incar
+  [output] incar/dielec_raman.incar
+
+  ✓ STEP 17 COMPLETE — Copy static Band/Irreps files to Raman dir (1s)
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  STEP 18 — Process Raman results                                 ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+  [energy] Processing 1.96 eV —
+
+--- Running: rm -f RAMFILE ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman ---
+--- Command completed successfully ---
+
+--- Running: cp store_ramfile/RAMFILE_1.96 RAMFILE ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman ---
+--- Command completed successfully ---
+
+--- Running: /global/cfs/cdirs/m526/vasp_binaries/binary_utility/raman_tensor < .raman_tensor_input > /dev/null ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman ---
+--- Command completed successfully ---
+    Raman tensor: pol=(1.0 0.0 0.0,1.0 0.0 0.0)
+
+--- Running: /global/cfs/cdirs/m526/vasp_binaries/binary_utility/broadening ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman ---
+--- Command completed successfully ---
+
+--- Running: mv Raman_intensity_complex Raman_intensity_complex_1.96eV ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman ---
+--- Command completed successfully ---
+
+--- Running: mv Raman_intensity_complex_broadening Raman_intensity_complex_broadening_1.96eV ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman ---
+--- Command completed successfully ---
+
+  [energy] Processing 2.33 eV —
+
+--- Running: rm -f RAMFILE ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman ---
+--- Command completed successfully ---
+
+--- Running: cp store_ramfile/RAMFILE_2.33 RAMFILE ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman ---
+--- Command completed successfully ---
+
+--- Running: /global/cfs/cdirs/m526/vasp_binaries/binary_utility/raman_tensor < .raman_tensor_input > /dev/null ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman ---
+--- Command completed successfully ---
+    Raman tensor: pol=(1.0 0.0 0.0,1.0 0.0 0.0)
+
+--- Running: /global/cfs/cdirs/m526/vasp_binaries/binary_utility/broadening ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman ---
+--- Command completed successfully ---
+
+--- Running: mv Raman_intensity_complex Raman_intensity_complex_2.33eV ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman ---
+--- Command completed successfully ---
+
+--- Running: mv Raman_intensity_complex_broadening Raman_intensity_complex_broadening_2.33eV ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman ---
+--- Command completed successfully ---
+
+  ✓ STEP 18 COMPLETE — Process Raman results (2s) — 2 energies processed
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  STEP 21 — Step 21                                               ║
+╚══════════════════════════════════════════════════════════════════╝
+
+  Prepared: 1.96eV/Raman_intensity_specific.dat
+  Prepared: 2.33eV/Raman_intensity_specific.dat
+
+--- Running: echo -e '5.0\nl' | python3 /global/homes/e/easuresh/SpectroPy/generate_raman_plots.py ---
+--- In directory: /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/raman ---
+--- Command completed successfully ---
+
+  ✓ STEP 21 COMPLETE — Step 21 (12s)
+
+  [output] raman_spectra/1.96eV.png
+  [output] raman_spectra/2.33eV.png
+  [output] raman_data/Raman_intensity_complex_broadening_1.96eV
+  [output] raman_data/Raman_intensity_complex_2.33eV
+  [output] raman_data/Raman_intensity_complex_broadening_2.33eV
+  [output] raman_data/Raman_intensity_complex_1.96eV
+  [output] raman_data/Raman_intensity_complex_broadening_1.96eV
+  [output] raman_data/Raman_intensity_complex_broadening_2.33eV
+
+  [scratch] Copying output/ from SCRATCH to HOME...
+
+--- Running: mkdir -p /global/homes/e/easuresh/vasp_calculations/hBN_LDA/output ---
+--- In directory: /global/homes/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+
+--- Running: cp -r /pscratch/sd/e/easuresh/vasp_calculations/hBN_LDA/output/* /global/homes/e/easuresh/vasp_calculations/hBN_LDA/output/ ---
+--- In directory: /global/homes/e/easuresh/vasp_calculations/hBN_LDA ---
+--- Command completed successfully ---
+  [scratch] Results saved to: /global/homes/e/easuresh/vasp_calculations/hBN_LDA/output

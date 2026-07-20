@@ -1,0 +1,79 @@
+# hBN PBEsol 9x9x1 defect supercell — boron vacancy VB-
+use_gam: true
+phonopy:
+  dim: "1 1 1"
+start_from_supercell: true
+compute_mode: "sbatch_mix"
+
+compute_modes:
+  sbatch_mix:
+    sbatch_relax: "--nodes=4 --gpus-per-node=4 --ntasks-per-node=4 --cpus-per-task=32 --time=01:00:00 --qos=regular --constraint=gpu -A m526"
+    srun_relax: "--nodes=4 --cpu_bind=cores --gpus-per-node=4 --ntasks-per-node=4  --cpus-per-task=32 -C gpu"
+    srun_per_dir: "--cpu_bind=cores --gpus-per-node=4 --ntasks-per-node=4 --nodes=1 --cpus-per-task=32 -C gpu"
+    srun_cpu_relax: "--cpu_bind=cores --nodes=1 --ntasks=16 --cpus-per-task=4"
+    sbatch: "--nodes=108 --gpus-per-node=4 --ntasks-per-node=4 --cpus-per-task=32 --time=03:00:00 --qos=regular --constraint=gpu -A m526"
+    salloc_post: "--nodes=4 --gpus-per-node=4 --ntasks-per-node=4 --cpus-per-task=32 --time=04:00:00 --qos=interactive --constraint=gpu -A m526"
+  interactive_serial:
+    srun_relax: "--cpu_bind=cores --gpus-per-node=4 --ntasks-per-node=4 --nodes=4 --cpus-per-task=32 -C gpu"
+    srun_cpu_relax: "--cpu_bind=cores --nodes=4 --ntasks-per-node=16 --cpus-per-task=4"
+    salloc: "-N 4 -C gpu --gpus-per-node=4 -t 04:00:00 --qos=interactive -A m526"
+
+steps:
+#  defect_relax_1:
+#    kpoints: {mesh: "1 1 1"}
+#    incar_overrides: |
+#      NELECT = 646
+#      GGA = PS
+#      ENCUT = 400
+#      KPAR = 1
+#      MAGMOM = 161*1
+# hf_setup: {}
+# force_consts:
+#   kpoints: {mesh: "1 1 1"}
+#   incar_overrides: |
+#     NELECT = 646
+#     GGA = PS
+#     ENCUT = 400
+#     KPAR = 1
+#     MAGMOM = 161*1
+# phonon_post: {}
+# raman_prep: {}
+# resonant_vasp:
+#   kpoints: {mesh: "1 1 1"}
+#   incar_overrides: |
+#     ENCUT = 400
+#     NELECT = 646
+#     GGA = PS
+#     NBANDS = 1536
+#     KPAR = 1
+#     MAGMOM = 161*1
+  post_process:
+    symmetry_filter:
+      enabled: true
+      allowed_irreps: ["A1'", "E'"]
+    desired_energies:
+      - "0.00"
+      - "0.20"
+      - "0.40"
+      - "0.60"
+      - "0.80"
+      - "1.00"
+      - "1.20"
+      - "1.40"
+      - "1.60"
+      - "1.80"
+      - "1.96"
+      - "2.00"
+      - "2.20"
+      - "2.33"
+
+
+
+#defect_relax_2_cpu:
+# kpoints: {mesh: "3 3 1"}
+# incar_overrides: |
+#   NELECT = 646
+#   GGA = PS
+#   ISIF = 4
+#   ALGO = Normal
+#   ENCUT = 400
