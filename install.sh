@@ -7,40 +7,55 @@
 #  What it does:
 #    1. Creates $RAMAN_PROJECT_DIR (default ~/vasp_calculations) and a
 #       starter shared_workflow_settings.yaml if one isn't already there.
-#    2. Appends the required env vars to ~/.bashrc (guarded by a marker so
-#       re-running doesn't duplicate them), with cluster-specific values
-#       either passed as flags or left as placeholders to edit by hand.
-#    3. Checks the phonopy conda env, the VASP module, and PyYAML are
+#    2. Sources <cluster>.bashrc (repo root) for that cluster's system paths,
+#       then appends PATH/RAMAN_PROJECT_DIR plus those paths to ~/.bashrc
+#       (guarded by a marker so re-running doesn't duplicate them).
+#    3. Checks the phonopy conda env, the VASP binary, and PyYAML are
 #       actually reachable, and reports clearly what's missing.
-#    4. Makes new/*.py and new/*.sh executable.
+#    4. Makes generate.py/check_*.py/runHF executable.
 #
 #  What it deliberately does NOT do:
-#    - Touch src/, util/, scripts/ (the old pipeline) — this only sets up
-#      the new/ pipeline.
 #    - Create or modify any per-material directory — that's generate.py's
 #      job, per material, on demand.
 #    - Overwrite an existing shared_workflow_settings.yaml.
+#    - Put any of these paths in shared_workflow_settings.yaml — common.sh
+#      and generate.py both read them from ~/.bashrc / the environment
+#      only. See <cluster>.bashrc (repo root), the single source of truth
+#      per cluster.
 #
 #  Usage:
-#    ./install.sh [--project-dir DIR] [--conda-env PATH] [--conda-init PATH]
-#                  [--vasp-binary PATH] [--vasp-modules "mod1 mod2 ..."]
-#                  [--binary-utils DIR]
+#    ./install.sh <nersc|pathfinder> [--project-dir DIR] [--conda-env PATH]
+#                  [--conda-init PATH] [--vasp-binary PATH]
+#                  [--vasp-modules "mod1 mod2 ..."] [--binary-utils DIR]
 #
-#  Every flag has a Perlmutter-shaped default; pass your cluster's actual
-#  values when porting elsewhere, or edit the .bashrc block install.sh
-#  writes afterward.
+#  The cluster argument selects <cluster>.bashrc (repo root) for defaults; any
+#  flag passed overrides just that one value, for a one-off install without
+#  editing the template. To change a cluster's defaults for good, edit
+#  <cluster>.bashrc instead.
 # =============================================================================
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLUSTERS_DIR="$REPO_DIR"
 
-# ── Defaults (Perlmutter-shaped; override via flags) ────────────────────────
+if [ $# -eq 0 ] || [[ "$1" == -h || "$1" == --help ]]; then
+    sed -n '2,35p' "${BASH_SOURCE[0]}"
+    echo
+    echo "Available clusters: $(cd "$CLUSTERS_DIR" && ls -- *.bashrc | sed 's/\.bashrc$//' | tr '\n' ' ')"
+    exit 0
+fi
+
+CLUSTER="$1"; shift
+CLUSTER_FILE="$CLUSTERS_DIR/$CLUSTER.bashrc"
+if [ ! -f "$CLUSTER_FILE" ]; then
+    echo "ERROR: unknown cluster '$CLUSTER' — no $CLUSTER_FILE" >&2
+    echo "Available clusters: $(cd "$CLUSTERS_DIR" && ls -- *.bashrc | sed 's/\.bashrc$//' | tr '\n' ' ')" >&2
+    exit 1
+fi
+
+# ── Defaults for this cluster, from <cluster>.bashrc (repo root) ──────────
 PROJECT_DIR="$HOME/vasp_calculations"
-CONDA_INIT="/global/common/software/m3035/conda/etc/profile.d/conda.sh"
-CONDA_ENV="/global/common/software/m526/phonopy_env"
-VASP_BINARY="/global/cfs/cdirs/m526/liangbo/bin/gpu/vasp_std"
-VASP_MODULES="PrgEnv-nvidia gpu cray-hdf5 cray-fftw nccl/2.18.3-cu12 vasp/6.4.3-gpu"
-BINARY_UTILS="/global/cfs/cdirs/m526/vasp_binaries/binary_utility"
+source "$CLUSTER_FILE"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -49,15 +64,16 @@ while [[ $# -gt 0 ]]; do
         --conda-init)    CONDA_INIT="$2"; shift 2 ;;
         --vasp-binary)   VASP_BINARY="$2"; shift 2 ;;
         --vasp-modules)  VASP_MODULES="$2"; shift 2 ;;
-        --binary-utils)  BINARY_UTILS="$2"; shift 2 ;;
+        --binary-utils)  BINARY_UTILITIES_DIR="$2"; shift 2 ;;
         -h|--help)
-            sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
+            sed -n '2,35p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
 
 echo "=== raman_workflow install ==="
 echo "  repo:        $REPO_DIR"
+echo "  cluster:     $CLUSTER"
 echo "  project dir: $PROJECT_DIR"
 echo
 
@@ -71,16 +87,13 @@ if [ -s "$SHARED_CFG" ]; then
 else
     cat > "$SHARED_CFG" <<EOF
 # Shared config, layered under every material's input/workflow_settings.yaml.
-# Per-material files override anything here. See new/generate.py's
+# Per-material files override anything here. See generate.py's
 # merge_config() for the exact merge rule (dicts recurse, scalars/lists replace).
-
-system_paths:
-  conda_init: "$CONDA_INIT"
-  conda_env: "$CONDA_ENV"
-  vasp_modules: "$VASP_MODULES"
-  binary_utilities_dir: "$BINARY_UTILS"
-  vasp_binary: "$VASP_BINARY"
-  # vasp_binary_cpu / vasp_binary_gam / vasp_binary_gam_cpu: fill in if used.
+#
+# No system_paths section here: conda/VASP/binary-utility paths live only in
+# ~/.bashrc, written by 'install.sh $CLUSTER' from $CLUSTER.bashrc (repo root).
+# Both common.sh (bash, job-runtime) and generate.py (Python,
+# codegen-time) read them from the environment, not from this file.
 
 # compute_mode: "interactive" | "sbatch_mix"  -- set per-material, not here,
 # unless every material on this cluster shares one mode.
@@ -93,7 +106,7 @@ steps: {}
   #     ISTART = 0
   #     ...
 EOF
-    echo "      wrote starter $SHARED_CFG — edit system_paths and steps for this cluster"
+    echo "      wrote starter $SHARED_CFG — edit steps: for this cluster/material set"
 fi
 
 # ── 2. .bashrc env vars ──────────────────────────────────────────────────
@@ -107,13 +120,18 @@ if [ -f "$BASHRC" ] && grep -qF "$MARKER_BEGIN" "$BASHRC"; then
 else
     {
         echo "$MARKER_BEGIN"
+        echo "# cluster: $CLUSTER — see raman_workflow/$CLUSTER.bashrc"
         echo "export PATH=\"\$PATH:$REPO_DIR/scripts\""
         echo "export RAMAN_PROJECT_DIR=\"$PROJECT_DIR\""
-        echo "export BINARY_UTILITIES_DIR=\"$BINARY_UTILS\""
-        echo "export VASP_BINARY=\"$VASP_BINARY\""
+        echo "export CONDA_INIT=\"$CONDA_INIT\""
+        echo "export CONDA_ENV=\"$CONDA_ENV\""
         echo "export VASP_MODULES=\"$VASP_MODULES\""
-        echo "# Optional overrides new/generate.py also understands (env wins over config):"
-        echo "#   VASP_BINARY_CPU, VASP_BINARY_GAM, VASP_BINARY_GAM_CPU"
+        echo "export VASP_BINARY=\"$VASP_BINARY\""
+        echo "export VASP_BINARY_CPU=\"$VASP_BINARY_CPU\""
+        echo "export VASP_BINARY_GAM=\"$VASP_BINARY_GAM\""
+        echo "export VASP_BINARY_GAM_CPU=\"$VASP_BINARY_GAM_CPU\""
+        echo "export BINARY_UTILITIES_DIR=\"$BINARY_UTILITIES_DIR\""
+        echo "export SPECTROPY_DIR=\"$SPECTROPY_DIR\""
         echo "$MARKER_END"
     } >> "$BASHRC"
     echo "[2/4] appended env vars to $BASHRC — run 'source ~/.bashrc' or start a new shell"
@@ -126,7 +144,7 @@ problems=0
 if [ -f "$CONDA_INIT" ]; then
     echo "      OK   conda_init found: $CONDA_INIT"
 else
-    echo "      MISSING conda_init: $CONDA_INIT (edit shared_workflow_settings.yaml / rerun with --conda-init)"
+    echo "      MISSING conda_init: $CONDA_INIT (edit $CLUSTER.bashrc / rerun with --conda-init)"
     problems=$((problems + 1))
 fi
 
@@ -140,21 +158,21 @@ if [ -d "$CONDA_ENV" ]; then
             || { echo "      MISSING PyYAML in $CONDA_ENV — pip/conda install pyyaml there"; problems=$((problems + 1)); }
     fi
 else
-    echo "      MISSING conda env: $CONDA_ENV (rerun with --conda-env)"
+    echo "      MISSING conda env: $CONDA_ENV (edit $CLUSTER.bashrc / rerun with --conda-env)"
     problems=$((problems + 1))
 fi
 
 if [ -f "$VASP_BINARY" ]; then
     echo "      OK   VASP binary found: $VASP_BINARY"
 else
-    echo "      MISSING VASP binary: $VASP_BINARY (rerun with --vasp-binary)"
+    echo "      MISSING VASP binary: $VASP_BINARY (edit $CLUSTER.bashrc / rerun with --vasp-binary)"
     problems=$((problems + 1))
 fi
 
-if [ -d "$BINARY_UTILS" ]; then
-    echo "      OK   binary_utilities_dir found: $BINARY_UTILS"
+if [ -d "$BINARY_UTILITIES_DIR" ]; then
+    echo "      OK   binary_utilities_dir found: $BINARY_UTILITIES_DIR"
 else
-    echo "      MISSING binary_utilities_dir: $BINARY_UTILS (rerun with --binary-utils)"
+    echo "      MISSING binary_utilities_dir: $BINARY_UTILITIES_DIR (edit $CLUSTER.bashrc / rerun with --binary-utils)"
     problems=$((problems + 1))
 fi
 
@@ -163,8 +181,8 @@ command -v sbatch >/dev/null 2>&1 \
     || { echo "      MISSING sbatch — is this a Slurm cluster login node?"; problems=$((problems + 1)); }
 
 # ── 4. Permissions ───────────────────────────────────────────────────────
-chmod +x "$REPO_DIR"/new/*.py "$REPO_DIR"/new/*.sh 2>/dev/null || true
-echo "[4/4] new/*.py, new/*.sh executable"
+chmod +x "$REPO_DIR"/generate.py "$REPO_DIR"/check_convergence.py "$REPO_DIR"/check_dielectric.py "$REPO_DIR"/runHF 2>/dev/null || true
+echo "[4/4] generate.py, check_*.py, runHF executable"
 
 echo
 if [ "$problems" -eq 0 ]; then
@@ -175,7 +193,7 @@ fi
 echo
 echo "Next steps:"
 echo "  1. source ~/.bashrc  (if the env block was just added)"
-echo "  2. Edit $SHARED_CFG — system_paths and any shared steps: templates"
+echo "  2. Edit $SHARED_CFG — steps: templates for this cluster/material set"
 echo "  3. For each material: mkdir -p \$RAMAN_PROJECT_DIR/<name>/input, add"
 echo "     POSCAR/POTCAR and input/workflow_settings.yaml, then:"
-echo "       $CONDA_ENV/bin/python3 $REPO_DIR/new/generate.py \$RAMAN_PROJECT_DIR/<name>"
+echo "       $CONDA_ENV/bin/python3 $REPO_DIR/generate.py \$RAMAN_PROJECT_DIR/<name>"

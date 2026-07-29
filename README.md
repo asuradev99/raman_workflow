@@ -1,136 +1,97 @@
 # Raman Workflow — _Ab Initio_ Resonant Raman Spectroscopy
 
-Automated VASP + Phonopy pipeline for computing resonant Raman spectra of 2D
-materials on NERSC Perlmutter.
+VASP + phonopy pipeline for computing resonant Raman spectra of 2D materials
+(hBN, MoS2, etc.), cluster-agnostic (NERSC Perlmutter, ORNL CADES Pathfinder).
 
-Built using Fortran code by Dr. Liango Liang (ORNL) and Johnathan Kowalski (https://github.com/TheorySpectroPy/SpectroPy)
-
-
-## Quick Start
-
-```bash
-# 1. Get a GPU node
-salloc -N 1 -C gpu --gpus-per-node=4 -t 04:00:00 --qos=interactive -A m526
-
-# 2. Run the pipeline (from ~/)
-bash raman_workflow/scripts/run_raman_pipeline_interactive.sh hBN_LDA
-
-# 3. Monitor
-tail -f $RAMAN_PROJECT_DIR/hBN_LDA/workflow.log
-```
-
-## Installation & Dependencies
-
-### Environment (add to `~/.bashrc`)
-
-```bash
-export RAMAN_PROJECT_DIR=/global/homes/$USER/vasp_calculations
-export BINARY_UTILITIES_DIR=/global/cfs/cdirs/m526/vasp_binaries/binary_utility
-export VASP_BINARY=/global/cfs/cdirs/m526/liangbo/bin/gpu/vasp_std
-export VASP_BINARY_CPU=/global/cfs/cdirs/m526/liangbo/bin/cpu/vasp_std
-export VASP_MODULES="gpu PrgEnv-nvidia cray-hdf5 cray-fftw nccl/2.18.3-cu12 vasp/6.4.3-gpu"
-```
-
-Then `source ~/.bashrc`.
-
-### Python
-
-```bash
-source /global/common/software/m3035/conda/etc/profile.d/conda.sh
-conda activate /global/common/software/m526/phonopy_env
-```
-
-### Prerequisites
-
-- NERSC Perlmutter account (project `m526`)
-- Compiled Fortran binaries in `$BINARY_UTILITIES_DIR`
-- VASP binary at `$VASP_BINARY`
+Built using Fortran code by Dr. Liangbo Liang (ORNL) and the SpectroPy
+project (https://github.com/TheorySpectroPy/SpectroPy).
 
 ## Architecture
 
 ```
 raman_workflow/
-├── src/                            # Pipeline source
-│   ├── automation_raman_analysis.py   # Entry point (8-step dispatcher)
-│   ├── scf_relax.py               # 1. VASP relaxation
-│   ├── supercell.py               # 2. Phonopy supercell + relaxation
-│   ├── hf_setup.py                # 3. hf/ directory setup
-│   ├── force_constants.py         # 4. VASP force constants
-│   ├── phonon_post.py             # 5. Phonopy postprocessing
-│   ├── raman_prep.py              # 6. Raman setup + displacements
-│   ├── resonant_vasp.py           # 7. Resonant VASP dielectric runs
-│   └── post_process.py            # 8. Kopia, RAMFILE, tensor, plots
-├── util/                          # Shared utilities (8 modules)
-│   ├── io.py                      #   Tee, run_command, formatting
-│   ├── vasp.py                    #   Convergence checks, force analysis
-│   ├── incar.py / kpoints.py      #   INCAR & KPOINTS generation
-│   ├── config.py                  #   YAML loading, srun args
-│   ├── symlinks.py                #   CHGCAR/WAVECAR management
-│   ├── status.py                  #   Logging, resume, progress tables
-│   ├── phonopy.py                 #   Phonopy config files
-│   └── postproc.py                #   Kopia, ramfile
-├── scripts/                       # Shell scripts
-│   ├── run_raman_pipeline_interactive.sh  # Single-material interactive
-│   ├── run_queue.sh               # Multi-material autonomous queue
-│   ├── run_raman_pipeline.sbatch  # Batch submission
-│   └── show_status.sh             # Extract last status from workflow.log
-├── post/                          # Post-processing & plotting
-├── workflow_settings.yaml         # Fallback config template
-├── queue_materials.conf           # Queue materials list
-└── shared_workflow_settings.yaml  # Saved copy of shared config
+├── generate.py           # the only thing you run by hand
+├── common.sh             # static env preamble, sourced by generated scripts
+├── check_convergence.py
+├── check_dielectric.py
+├── runHF
+├── post/                 # phonon/Raman plotting + VESTA symmetry visualization
+├── scripts/
+│   └── share_material.sh # copy a finished material to a shared location
+├── install.sh
+├── pathfinder.bashrc     # cluster-specific env defaults
+└── nersc.bashrc
 ```
 
-### Config Layering
+See `CLAUDE.md` for the full breakdown of each piece, known sharp edges, and
+how the `~/SpectroPy/` companion toolchain (a separate, standalone set of
+Python scripts exploring alternatives to the Fortran Raman binaries) relates
+to this pipeline.
 
-Per-material settings inherit from a shared base:
-
-```
-1. raman_workflow/workflow_settings.yaml      ← Fallback defaults
-2. vasp_calculations/shared_workflow_settings.yaml ← Shared base (all materials)
-3. <material>/input/workflow_settings.yaml     ← Per-material overrides
-```
-
-A material needs only 3 files in `input/`:
-
-```
-hBN_LDA/input/
-├── POSCAR                  # Crystal structure
-├── POTCAR                  # Pseudopotentials
-└── workflow_settings.yaml  # Overrides (phonopy dim, k-points, incar_settings)
-```
-
-INCARs, KPOINTS, and symmetry.conf are **auto-generated from YAML**.
-
-## How to Run
-
-### Interactive (single material, for testing)
+## Setup
 
 ```bash
-salloc -N 1 -C gpu --gpus-per-node=4 -t 04:00:00 --qos=interactive -A m526
-bash raman_workflow/scripts/run_raman_pipeline_interactive.sh hBN_LDA
+bash raman_workflow/install.sh <pathfinder|nersc>
+source ~/.bashrc
 ```
 
-Flags: `--restart` (clean start), `--cpu` (CPU VASP), `--no-scratch` (run on HOME).
+This creates `$RAMAN_PROJECT_DIR` (default `~/vasp_calculations`), appends
+`PATH`/`RAMAN_PROJECT_DIR` plus the cluster's env vars (`CONDA_INIT`,
+`CONDA_ENV`, `VASP_MODULES`, `VASP_BINARY*`, `BINARY_UTILITIES_DIR`,
+`SPECTROPY_DIR`, ...) into `~/.bashrc`'s `raman_workflow install.sh` block,
+and reports which paths/binaries it could and couldn't confirm exist.
 
-### Batch (single material)
+## Adding a material
+
+```
+$RAMAN_PROJECT_DIR/<name>/input/
+├── POSCAR
+├── POTCAR
+└── workflow_settings.yaml
+```
+
+`workflow_settings.yaml` defines `phonopy:` (supercell dim, displacement
+amplitude), `use_cpu`/`start_from_supercell`, `compute_mode` + `compute_modes:`
+(fully user-defined — no hardcoded mode names; a mode just needs
+`srun_relax`/`srun_per_dir`, plus `sbatch`/`sbatch_relax`/`sbatch_post` if it
+should be sbatch-dispatched rather than run inside an existing allocation),
+and `steps:` (which pipeline phases are active, with their VASP/phonopy
+settings). See `MoS2`/`MoS2_nosym` for a complete, working example, including
+`raman_prep.use_symmetry`.
+
+## Running
 
 ```bash
-sbatch raman_workflow/run_raman_pipeline.sbatch
+$CONDA_ENV/bin/python3 raman_workflow/generate.py $RAMAN_PROJECT_DIR/<name>
+bash $SCRATCH/vasp_calculations/<name>/run_all.sh
 ```
 
-### Autonomous Queue (multiple materials)
+`generate.py` writes into `$SCRATCH/vasp_calculations/<name>/` by default
+(`--no-scratch` to write directly into the material dir instead — only if
+explicitly asked for). `--cpu` picks the CPU VASP binary variant. `--debug`
+bakes VASP's real `--dry-run` into every call and writes into a nested
+`debug/` subdirectory, so it never touches real data.
 
-Processes all materials in `queue_materials.conf` sequentially — each gets its
-own allocation, no terminal needed:
+## Monitoring
 
 ```bash
-nohup bash raman_workflow/scripts/run_queue.sh &> queue.log &
+sacct -u $USER --starttime=today -o JobID,JobName,State,ExitCode,Start,End
+tail -f $SCRATCH/vasp_calculations/<name>/slurm-<jobid>.out
 ```
 
-Monitor: `tail -f queue.log` or `squeue -u $USER`.
+Each generated step script prints timestamped progress markers at every
+major point (start, checkpoint resume, srun launch/exit) — a silent gap
+between two log lines pinpoints where a run died. Run a step's own
+`--check` (e.g. `bash raman/run_post_process.sh --check`) to see status
+without launching anything.
 
-### Material Status
+## Sharing a finished material
 
 ```bash
-bash raman_workflow/scripts/show_status.sh $RAMAN_PROJECT_DIR/hBN_LDA/workflow.log
+bash raman_workflow/scripts/share_material.sh <name> [--pathfinder] [--login-node] [--with-chgcar-wavecar]
 ```
+
+Copies to `$SHARE_MATERIAL_DIR/<name>` (set by `<cluster>.bashrc`).
+`--login-node` runs a single plain rsync directly, no Slurm allocation —
+the right choice for a modest-size material. Excludes CHGCAR/WAVECAR/WAVEDER/
+`*.h5`/`*.ispin1_backup` by default.

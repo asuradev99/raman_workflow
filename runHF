@@ -1,0 +1,30 @@
+#!/bin/bash                                                 
+#
+for d in POSCAR-*; do
+(
+   mkdir hf_$d
+   cd hf_$d
+   cp ../$d POSCAR
+   ln -s ../KPOINTS .
+   ln -s ../POTCAR .
+   ln -s ../INCAR .
+   if [ -e  ../CHGCAR ]; then
+     ln -s ../CHGCAR .
+   fi
+   if [ -e  ../WAVECAR ]; then
+     ln -s ../WAVECAR .
+   fi   
+   if [ -e  ../vdw_kernel.bindat ]; then
+     ln -s ../vdw_kernel.bindat .
+   fi
+)
+done
+
+mkdir groundstate
+cd groundstate
+cp ../SPOSCAR POSCAR
+ln -s ../KPOINTS .
+ln -s ../POTCAR .
+if [ ! -e  INCAR  ]; then
+  cp ../../INCAR .
+fi

@@ -1,0 +1,871 @@
+#!/usr/bin/env python3
+"""Lightweight Raman-pipeline generator.
+
+Reads the layered YAML config for one material and emits self-contained bash
+scripts (a runner + one script per step) into the material's work directory.
+Everything config-derived is baked in as literals; the generated bash has no
+dependency on this repo except that it sources common.sh and calls
+check_*.py by absolute path.
+
+    python3 generate.py <material_dir> [--no-scratch] [--cpu] [--debug]
+
+Runs on $SCRATCH by default (output copied back to the material dir); pass
+--no-scratch to run directly in the material dir.
+
+This file is standalone: no imports from the old src/ or util/ packages. The
+config-merge and INCAR-build logic below are ported (not imported) from
+util/config.py and util/incar.py.
+"""
+import argparse
+import os
+import sys
+
+import yaml
+
+REPO_NEW = os.path.dirname(os.path.abspath(__file__))          # .../raman_workflow
+COMMON_SH = os.path.join(REPO_NEW, "common.sh")
+CHECK_CONV = os.path.join(REPO_NEW, "check_convergence.py")
+CHECK_DIEL = os.path.join(REPO_NEW, "check_dielectric.py")
+RUN_HF = os.path.join(REPO_NEW, "runHF")
+
+
+# =============================================================================
+#  Config layer  (ported from util/config.py)
+# =============================================================================
+def merge_config(target, incoming):
+    """Deep-merge *incoming* into *target*; dicts recurse, scalars/lists replace,
+    keys starting with '_' skipped."""
+    if incoming is None:
+        return
+    for k, v in incoming.items():
+        if k.startswith("_"):
+            continue
+        if isinstance(v, dict) and isinstance(target.get(k), dict):
+            merge_config(target[k], v)
+        else:
+            target[k] = v
+
+
+def load_config(paths):
+    cfg = {}
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+        with open(path) as f:
+            merge_config(cfg, yaml.safe_load(f))
+        print(f"Loaded config: {path}")
+    return cfg
+
+
+# compute_mode is just a name you choose in YAML -- nothing in this file
+# hardcodes "interactive"/"sbatch_mix"/etc. Define as many compute_modes.<name>
+# blocks as you like (e.g. one per cluster: sbatch_mix_nersc, sbatch_mix_pathfinder,
+# each with its own srun/sbatch args) and point compute_mode at whichever
+# applies. srun_relax/srun_per_dir are always required (every mode has to run
+# VASP somehow); sbatch/sbatch_relax/sbatch_post are optional -- whether any of
+# them are present is what decides the runner's behavior (see emit_run_all),
+# not the mode's name.
+REQUIRED_MODE_KEYS = ("srun_relax", "srun_per_dir")
+
+
+def validate_config(cfg, step_names):
+    missing = []
+    mode = cfg.get("compute_mode")
+    if mode is None:
+        sys.exit(
+            "ERROR: compute_mode is not set in config.\n"
+            "       Set compute_mode to the name of a compute_modes.<name> "
+            "section (your choice of name) in shared_workflow_settings.yaml "
+            "or the per-material config."
+        )
+
+    mode_cfg = cfg.get("compute_modes", {}).get(mode, {})
+    if not mode_cfg:
+        missing.append(f"compute_modes.{mode} section missing")
+    else:
+        for key in REQUIRED_MODE_KEYS:
+            if key not in mode_cfg:
+                missing.append(f"compute_modes.{mode}.{key} missing")
+
+    for sect in ("phonopy", "steps"):
+        if sect not in cfg:
+            missing.append(f"[{sect}] section missing")
+
+    known = set(STEP_ORDER) | {"defect_relax_1"}
+    for name in step_names:
+        if name not in known:
+            missing.append(f"unknown step '{name}'")
+
+    if missing:
+        print("ERROR: config problems:")
+        for m in missing:
+            print("  " + m)
+        sys.exit(1)
+
+
+# =============================================================================
+#  INCAR layer  (ported from util/incar.py)
+# =============================================================================
+def _parse_incar(text):
+    tags = {}
+    for line in text.strip().split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("!"):
+            continue
+        if "=" in line:
+            tag, val = line.split("=", 1)
+            tags[tag.strip()] = val.strip()
+    return tags
+
+
+def _format_incar(tags):
+    return "\n".join(f"{t} = {v}" for t, v in tags.items())
+
+
+def build_incar_content(cfg, step_name, debug_overrides=None):
+    steps = cfg.get("steps", {})
+    template_text = steps.get(step_name, {}).get("incar", "")
+    if not template_text:
+        raise KeyError(f"Missing steps.{step_name}.incar (have: {list(steps.keys())})")
+    override_text = steps.get(step_name, {}).get("incar_overrides", "")
+
+    template_tags = _parse_incar(template_text)
+    override_tags = _parse_incar(override_text) if override_text else {}
+    if debug_overrides:
+        override_tags.update(debug_overrides)
+    if not override_tags:
+        return template_text.strip() + "\n"
+    for tag in override_tags:
+        template_tags.pop(tag, None)
+    parts = [_format_incar(override_tags)]
+    if template_tags:
+        parts.append(_format_incar(template_tags))
+    return "\n".join(parts) + "\n"
+
+
+def kpoints_content(comment, mesh, shift):
+    return f"{comment}\n0\nGamma\n{mesh}\n{shift}\n"
+
+
+# =============================================================================
+#  Step ordering
+# =============================================================================
+STEP_ORDER = [
+    "scf_relax", "supercell", "hf_setup", "force_consts",
+    "phonon_post", "raman_prep", "resonant_vasp", "post_process",
+]
+
+
+# =============================================================================
+#  Bake dict  (replaces PipelineContext.__post_init__)
+# =============================================================================
+def resolve_binary(cfg, cpu_flag):
+    gam = cfg.get("use_gam", False)
+    # --cpu on the command line OR use_cpu: true in the material's own config
+    # -- config wins by being persistent: a material that only has a CPU
+    # binary to run on (e.g. everything on Pathfinder today, which has no GPU
+    # VASP build) shouldn't depend on remembering --cpu every regeneration.
+    cpu = cpu_flag or cfg.get("use_cpu", False)
+    env = {
+        (False, False): "VASP_BINARY",
+        (False, True): "VASP_BINARY_GAM",
+        (True, False): "VASP_BINARY_CPU",
+        (True, True): "VASP_BINARY_GAM_CPU",
+    }[(cpu, gam)]
+    return os.environ.get(env, "")
+
+
+def _kp(cfg, step, key, default=""):
+    return cfg.get("steps", {}).get(step, {}).get("kpoints", {}).get(key, default)
+
+
+def build_bake(cfg, cpu_flag, home_output_dir):
+    mode = cfg.get("compute_mode", "interactive")
+    mode_cfg = cfg.get("compute_modes", {}).get(mode, {})
+    post = cfg.get("steps", {}).get("post_process", {})
+    rt = post.get("raman_tensor", {})
+    symf = post.get("symmetry_filter", {})
+    rp = cfg.get("steps", {}).get("raman_prep", {})
+    # Default: same amplitude on x/y/z as the force-constant phonopy displacement.
+    # Override per-material via steps.raman_prep.displacement, e.g. a different
+    # out-of-plane amplitude for 2D materials ("0.03 0.03 0.05").
+    default_displacement = " ".join([str(cfg["phonopy"]["amplitude"])] * 3)
+
+    b = {
+        "COMPUTE_MODE": mode,
+        "BIN": os.environ.get("BINARY_UTILITIES_DIR", ""),
+        "SPECTROPY": os.environ.get("SPECTROPY_DIR", ""),
+        "VASP_BINARY": resolve_binary(cfg, cpu_flag),
+        "PHONOPY_DIM": cfg["phonopy"]["dim"],
+        "PHONOPY_AMP": cfg["phonopy"]["amplitude"],
+        "SRUN_PER_DIR": mode_cfg.get("srun_per_dir", ""),
+        "SRUN_RELAX": mode_cfg.get("srun_relax", ""),
+        "SBATCH_RELAX": mode_cfg.get("sbatch_relax", "") or mode_cfg.get("sbatch", ""),
+        "SBATCH_MAIN": mode_cfg.get("sbatch", ""),
+        "SBATCH_POST": mode_cfg.get("sbatch_post", "") or mode_cfg.get("sbatch", ""),
+        "START_FROM_SUPERCELL": cfg.get("start_from_supercell", False),
+        "HOME_OUTPUT_DIR": home_output_dir or "",
+        # kpoints per step
+        "SCF_MESH": _kp(cfg, "scf_relax", "mesh"),
+        "SCF_SHIFT": _kp(cfg, "scf_relax", "shift", "0 0 0"),
+        "SUP_MESH": _kp(cfg, "supercell", "mesh"),
+        "SUP_SHIFT": _kp(cfg, "supercell", "shift", "0 0 0"),
+        "HF_MESH": _kp(cfg, "force_consts", "mesh"),
+        "HF_SHIFT": _kp(cfg, "force_consts", "shift", "0 0 0"),
+        "RAMAN_MESH": _kp(cfg, "resonant_vasp", "mesh"),
+        "RAMAN_SHIFT": _kp(cfg, "resonant_vasp", "shift", "0 0 0"),
+        "DEFECT_MESH": _kp(cfg, "defect_relax_1", "mesh") or _kp(cfg, "scf_relax", "mesh"),
+        "DEFECT_SHIFT": _kp(cfg, "defect_relax_1", "shift", "") or _kp(cfg, "scf_relax", "shift", "0 0 0"),
+        # post_process
+        "ENERGIES": " ".join(str(e) for e in post.get("desired_energies", [])),
+        "INCIDENT_POL": rt.get("incident_polarization", "1.0 0.0 0.0"),
+        "SCATTERED_POL": rt.get("scattered_polarization", "1.0 0.0 0.0"),
+        "SURFACE_NORMAL": rt.get("surface_normal", "z"),
+        "SYM_ENABLED": symf.get("enabled", False),
+        "SYM_IRREPS": " ".join(symf.get("allowed_irreps", ["A1'", "E'"])),
+        # raman_prep: symmetry-reduced displacement generation (see Liangbo's
+        # 2026-07-27 email). use_symmetry picks raman_dis vs raman_dis_nosym;
+        # unrelated to SYM_ENABLED above, which filters *output* by irrep.
+        "RAMAN_USE_SYMMETRY": rp.get("use_symmetry", True),
+        "RAMAN_DISPLACEMENT": rp.get("displacement", default_displacement),
+        # eigenvectors / viz
+        "EIG_PATH": cfg.get("steps", {}).get("phonon_post", {}).get("eigenvectors_band", {}).get("path", "0.0 0.0 0.0  0.0 0.0 0.0"),
+        "EIG_LABELS": cfg.get("steps", {}).get("phonon_post", {}).get("eigenvectors_band", {}).get("labels", "GAMMA GAMMA"),
+        "EIG_POINTS": cfg.get("steps", {}).get("phonon_post", {}).get("eigenvectors_band", {}).get("points", 1),
+        "VIZ_ENABLED": cfg.get("steps", {}).get("phonon_post", {}).get("visualization", {}).get("enabled", False),
+        "VIZ_SCALE": cfg.get("steps", {}).get("phonon_post", {}).get("visualization", {}).get("scale_factor", 0.5),
+        # seed files
+        "SEED_CHGCAR": cfg.get("seed_files", {}).get("chgcar", ""),
+        "SEED_WAVECAR": cfg.get("seed_files", {}).get("wavecar", ""),
+    }
+    return b
+
+
+# =============================================================================
+#  Emitters — each returns a finished bash script string
+# =============================================================================
+HEADER = "#!/bin/bash\nset -euo pipefail\nsource {common}\ncd \"$(dirname \"$0\")\"\n"
+
+
+def _header():
+    return HEADER.format(common=COMMON_SH)
+
+
+def symmetry_conf(dim):
+    return f"DIM = {dim}\nIRREPS = 0 0 0\n"
+
+
+def eigenvectors_conf(b):
+    lines = [f"DIM = {b['PHONOPY_DIM']}", f"BAND = {b['EIG_PATH']}"]
+    if b["EIG_LABELS"]:
+        lines.append(f"BAND_LABELS = {b['EIG_LABELS']}")
+    lines.append(f"BAND_POINTS = {b['EIG_POINTS']}")
+    lines.append("EIGENVECTORS = .TRUE.")
+    return "\n".join(lines) + "\n"
+
+
+def emit_relax(cfg, b, step, dst_dir, debug):
+    """scf_relax / defect_relax_1. dst_dir: 'scf' (single-stage relax only)."""
+    incar = build_incar_content(cfg, step)
+    if step == "defect_relax_1":
+        mesh, shift = b["DEFECT_MESH"], b["DEFECT_SHIFT"]
+    else:
+        mesh, shift = b["SCF_MESH"], b["SCF_SHIFT"]
+    kpts = kpoints_content("K-points", mesh, shift)
+    dryrun = " --dry-run" if debug else ""
+
+    is_defect1 = step == "defect_relax_1"
+    done_file = "CONTCAR_ISIF2" if is_defect1 else "CONTCAR"
+    seed_lines = ""
+    if b["SEED_CHGCAR"]:
+        seed_lines += f'[ -f CHGCAR ] || cp "{b["SEED_CHGCAR"]}" CHGCAR 2>/dev/null || true\n'
+    if b["SEED_WAVECAR"]:
+        seed_lines += f'[ -f WAVECAR ] || cp "{b["SEED_WAVECAR"]}" WAVECAR 2>/dev/null || true\n'
+
+    post_success = ""
+    if is_defect1:
+        post_success = "    cp CONTCAR CONTCAR_ISIF2; cp OUTCAR OUTCAR_ISIF2; cp OSZICAR OSZICAR_ISIF2\n"
+
+    s = _header()
+    s += f"""
+case "${{1:-}}" in
+  --check)   python3 {CHECK_CONV} --relax . >/dev/null 2>&1 && [ -s {done_file} ] && exit 0 || exit 1 ;;
+  --restart) rm -f OUTCAR CONTCAR OSZICAR vasprun.xml vaspout.h5 relaxation.stdout"""
+    if is_defect1:
+        s += " CONTCAR_ISIF2 OUTCAR_ISIF2 OSZICAR_ISIF2"
+    s += """; exit 0 ;;
+esac
+"""
+    s += f"""echo "[{step}] start: $(date '+%H:%M:%S') pwd=$(pwd)"
+python3 {CHECK_CONV} --relax . >/dev/null 2>&1 && [ -s {done_file} ] && {{ echo "[{step}] already complete"; exit 0; }}
+
+[ -f POSCAR ] || cp ../input/POSCAR POSCAR 2>/dev/null || true
+cp ../input/POTCAR POTCAR 2>/dev/null || true
+{seed_lines}for f in INCAR KPOINTS; do
+    [ -s "$f" ] || {{ echo "[{step}] FATAL: $f missing — run generate.py" >&2; exit 1; }}
+done
+echo "[{step}] INCAR/KPOINTS present, resuming from checkpoint if any"
+resume_contcar
+
+echo "[{step}] launching srun at $(date '+%H:%M:%S')"
+rm -f OUTCAR
+srun {b['SRUN_RELAX']} {b['VASP_BINARY']}{dryrun} 2>&1 | tee relaxation.stdout
+srun_rc=${{PIPESTATUS[0]}}
+echo "[{step}] srun exited $srun_rc at $(date '+%H:%M:%S')"
+if [ "$srun_rc" -ne 0 ]; then
+    echo "[{step}] FATAL: srun exited $srun_rc" >&2
+    exit 1
+fi
+if python3 {CHECK_CONV} --relax . >/dev/null 2>&1; then
+{post_success}    echo "[{step}] converged"
+    exit 0
+fi
+echo "[{step}] FATAL: not converged" >&2
+exit 1
+"""
+    return s
+
+
+def emit_supercell(cfg, b, debug):
+    incar = build_incar_content(cfg, "supercell")
+    kpts = kpoints_content("K-points", b["SUP_MESH"], b["SUP_SHIFT"])
+    dryrun = " --dry-run" if debug else ""
+    sfs = b["START_FROM_SUPERCELL"]
+    check = '[ -s SPOSCAR ]' if sfs else '[ -s groundstate/CONTCAR ]'
+    s = _header()
+    s += f"""
+case "${{1:-}}" in
+  --check)   {check} && exit 0 || exit 1 ;;
+  --restart) rm -rf groundstate SPOSCAR POSCAR-* phonopy_disp.yaml; exit 0 ;;
+esac
+{check} && {{ echo "[supercell] already complete"; exit 0; }}
+
+cp ../scf/CONTCAR POSCAR_unitcell
+[ -s SPOSCAR ] || phonopy -d --dim="{b['PHONOPY_DIM']}" --amplitude={b['PHONOPY_AMP']} -c POSCAR_unitcell
+mkdir -p groundstate
+cp SPOSCAR groundstate/POSCAR
+"""
+    if not sfs:
+        s += f"""cp ../input/POTCAR groundstate/POTCAR 2>/dev/null || true
+cat > groundstate/INCAR <<'INCAR_EOF'
+{incar}INCAR_EOF
+cat > groundstate/KPOINTS <<'KPT_EOF'
+{kpts}KPT_EOF
+( cd groundstate && srun {b['SRUN_PER_DIR']} {b['VASP_BINARY']}{dryrun} 2>&1 | tee supercell_relax.stdout; exit "${{PIPESTATUS[0]}}" )
+srun_rc=$?
+[ "$srun_rc" -eq 0 ] || {{ echo "[supercell] FATAL: srun exited $srun_rc" >&2; exit 1; }}
+python3 {CHECK_CONV} --relax groundstate >/dev/null 2>&1 || {{ echo "[supercell] FATAL: groundstate relax not converged" >&2; exit 1; }}
+n=$(grep -c 'reached required accuracy' groundstate/OUTCAR 2>/dev/null || echo 0)
+cp groundstate/CONTCAR CONTCAR_supercell_relaxed
+cp groundstate/CONTCAR CONTCAR
+"""
+    else:
+        s += "cp SPOSCAR CONTCAR\n"
+    s += 'echo "[supercell] done"\n'
+    return s
+
+
+def emit_hf_setup(cfg, b, debug):
+    incar = build_incar_content(cfg, "force_consts")
+    kpts = kpoints_content("K-points", b["HF_MESH"], b["HF_SHIFT"])
+    dryrun = " --dry-run" if debug else ""
+    # start_from_supercell: defect_relax_1 already produced the full supercell
+    # in ../scf; hf_setup reads its CONTCAR directly, and CHGCAR/WAVECAR seeds
+    # live there too. Otherwise emit_supercell relaxed the supercell itself
+    # and left CONTCAR/CHGCAR/WAVECAR in this same hf/ directory (its own cwd)
+    # -- reading from ../scf here would be the pre-supercell unit cell, wrong.
+    sfs = b["START_FROM_SUPERCELL"]
+    relax_dir = "../scf" if sfs else "."
+    symlink_src = "../../scf" if sfs else "../groundstate"
+    s = _header()
+    s += f"""
+case "${{1:-}}" in
+  --check)   compgen -G "hf_POSCAR-*" >/dev/null && exit 0 || exit 1 ;;
+  --restart) rm -rf hf_POSCAR-* SPOSCAR POSCAR-* phonopy_disp.yaml groundstate; exit 0 ;;
+esac
+if compgen -G "hf_POSCAR-*" >/dev/null; then
+    echo "[hf_setup] already complete"; exit 0
+fi
+
+relax_dir={relax_dir}
+cp "$relax_dir/CONTCAR" POSCAR_unitcell
+cp ../input/POTCAR POTCAR 2>/dev/null || true
+for f in INCAR KPOINTS symmetry.conf; do
+    [ -s "$f" ] || {{ echo "[hf_setup] FATAL: $f missing — run generate.py" >&2; exit 1; }}
+done
+
+[ -s SPOSCAR ] || phonopy -d --dim="{b['PHONOPY_DIM']}" --amplitude={b['PHONOPY_AMP']} -c POSCAR_unitcell
+if [ -x "{b['BIN']}/runHF" ]; then
+    {b['BIN']}/runHF
+else
+    {RUN_HF}
+fi
+
+for d in hf_POSCAR-*; do
+    cat > "$d/run_vasp.sh" <<VASP_EOF
+#!/bin/bash
+set -euo pipefail
+source {COMMON_SH}
+cd "\\$(dirname "\\$0")"
+python3 {CHECK_CONV} --static . >/dev/null 2>&1 && exit 0
+srun {b['SRUN_PER_DIR']} {b['VASP_BINARY']}{dryrun} > relaxation.stdout 2>&1
+VASP_EOF
+    chmod +x "$d/run_vasp.sh"
+done
+
+mkdir -p groundstate
+for f in CHGCAR WAVECAR; do
+    src="$relax_dir/$f"; [ -s "$src" ] || continue
+    [ "$relax_dir" != groundstate ] && ln -sf "$src" "groundstate/$f"
+    for d in hf_POSCAR-*; do ln -sf "{symlink_src}/$f" "$d/$f"; done
+done
+echo "[hf_setup] $(ls -d hf_POSCAR-* | wc -l) dirs created"
+"""
+    return s
+
+
+def emit_dir_loop(b, glob, log, dielectric):
+    """force_consts / resonant_vasp — batch run_vasp.sh over displacement dirs."""
+    diel = ""
+    if dielectric:
+        diel = f'    python3 {CHECK_DIEL} "$d" || {{ echo "[FATAL] $d no Im(ε)" >&2; exit 1; }}\n'
+    s = _header()
+    s += f"""
+CHECK="python3 {CHECK_CONV} --static"
+check_all() {{ local d; for d in {glob}; do $CHECK "$d" >/dev/null 2>&1 || return 1; done; }}
+
+case "${{1:-}}" in
+  --check)   check_all && exit 0 || exit 1 ;;
+  --restart) for d in {glob}; do rm -f "$d"/{{OUTCAR,CONTCAR,OSZICAR,vasprun.xml,vaspout.h5,{log}}}; done; exit 0 ;;
+esac
+check_all && {{ echo "[dispatch] already complete"; exit 0; }}
+
+dirs=( {glob} )
+concurrent=${{SLURM_JOB_NUM_NODES:-1}}
+echo "[dispatch] ${{#dirs[@]}} dirs, ${{concurrent}}/batch, starting at $(date '+%H:%M:%S')"
+for (( s=0; s<${{#dirs[@]}}; s+=concurrent )); do
+    echo "[dispatch] batch starting at dir index $s ($(date '+%H:%M:%S'))"
+    for (( i=s; i<s+concurrent && i<${{#dirs[@]}}; i++ )); do
+        bash "${{dirs[i]}}/run_vasp.sh" &
+    done
+    wait
+    echo "[dispatch] batch at index $s done ($(date '+%H:%M:%S'))"
+done
+
+for d in {glob}; do
+    $CHECK "$d" >/dev/null 2>&1 || {{ echo "[FATAL] $d did not converge" >&2; exit 1; }}
+{diel}done
+echo "[dispatch] all ${{#dirs[@]}} dirs converged"
+"""
+    return s
+
+
+def emit_phonon_post(cfg, b):
+    s = _header()
+    s += f"""
+case "${{1:-}}" in
+  --check)   [ -s band.yaml ] && [ -s FORCE_SETS ] && exit 0 || exit 1 ;;
+  --restart) rm -f FORCE_SETS band.yaml irreps.yaml eigenvectors.yaml mesh.yaml; rm -rf VESTA_MODES; exit 0 ;;
+esac
+if [ -s band.yaml ] && [ -s FORCE_SETS ]; then
+    echo "[phonon_post] already complete"; exit 0
+fi
+
+mapfile -t vaspruns < <(ls hf_POSCAR-*/vasprun.xml 2>/dev/null | sort)
+if (( ${{#vaspruns[@]}} == 0 )); then
+    echo "[phonon_post] FATAL: no vasprun.xml" >&2; exit 1
+fi
+ndirs=$(ls -d hf_POSCAR-* | wc -l)
+if (( ${{#vaspruns[@]}} < ndirs )); then
+    echo "[phonon_post] WARNING: ${{#vaspruns[@]}}/${{ndirs}} vasprun.xml present"
+fi
+
+phonopy -f "${{vaspruns[@]}}"
+for f in eigenvectors.conf symmetry.conf; do
+    [ -s "$f" ] || {{ echo "[phonon_post] FATAL: $f missing — run generate.py" >&2; exit 1; }}
+done
+phonopy -c POSCAR_unitcell eigenvectors.conf
+phonopy -c POSCAR_unitcell symmetry.conf
+"""
+    if b["VIZ_ENABLED"] and b["SPECTROPY"]:
+        s += f"""python3 {b['SPECTROPY']}/visualize_modes.py --poscar POSCAR_unitcell --band band.yaml --outdir VESTA_MODES --format vesta --scale {b['VIZ_SCALE']} || echo "[viz] WARNING: skipped"
+"""
+    s += 'echo "[phonon_post] done"\n'
+    return s
+
+
+def emit_raman_prep(cfg, b, debug):
+    incar = build_incar_content(cfg, "resonant_vasp")
+    kpts = kpoints_content("K-points", b["RAMAN_MESH"], b["RAMAN_SHIFT"])
+    dryrun = " --dry-run" if debug else ""
+    # Liangbo's 2026-07-27 email: ramdiscar/genRApos610/runRA are replaced by
+    # raman_dis(_nosym)/raman_poscar + the run_raman script raman_poscar itself
+    # writes. Displacement generation is now symmetry-reduced by default (only
+    # non-equivalent atoms get displaced) -- raman_dis needs a "symmetry" file
+    # from `phonopy --symmetry` plus raman_symmetry_mapping's atom-mapping
+    # output (symmetry_operation_matrices); raman_dis_nosym needs neither and
+    # displaces every atom. Either way raman_poscar writes pos_* displacement
+    # files *and* generates a run_raman script that turns each pos_* into a
+    # full ra_pos_*/ VASP directory (POSCAR + symlinked KPOINTS/POTCAR/INCAR/
+    # CHGCAR/WAVECAR) -- but run_raman's own $VASP launch line ships commented
+    # out, so we still write our own run_vasp.sh per ra_pos_* dir below.
+    dis_binary = "raman_dis" if b["RAMAN_USE_SYMMETRY"] else "raman_dis_nosym"
+    s = _header()
+    s += f"""
+case "${{1:-}}" in
+  --check)   compgen -G "ra_pos_*" >/dev/null && exit 0 || exit 1 ;;
+  --restart) rm -rf ra_pos_* pos_* run_raman symmetry symmetry_operation_matrices atomic_displacement; exit 0 ;;
+esac
+compgen -G "ra_pos_*" >/dev/null && {{ echo "[raman_prep] already complete"; exit 0; }}
+
+cp ../scf/CONTCAR CONTCAR
+for f in CHGCAR WAVECAR; do [ -s "../scf/$f" ] && ln -sf "../scf/$f" "$f"; done
+cp ../input/POTCAR POTCAR 2>/dev/null || true
+for f in INCAR KPOINTS; do
+    [ -s "$f" ] || {{ echo "[raman_prep] FATAL: $f missing — run generate.py" >&2; exit 1; }}
+done
+
+phonopy --symmetry -c CONTCAR > symmetry
+{b['BIN']}/raman_symmetry_mapping
+echo "{b['RAMAN_DISPLACEMENT']}" | {b['BIN']}/{dis_binary}
+{b['BIN']}/raman_poscar
+bash run_raman
+
+for d in ra_pos_*; do
+    cat > "$d/run_vasp.sh" <<VASP_EOF
+#!/bin/bash
+set -euo pipefail
+source {COMMON_SH}
+cd "\\$(dirname "\\$0")"
+python3 {CHECK_CONV} --static . >/dev/null 2>&1 && exit 0
+srun {b['SRUN_PER_DIR']} {b['VASP_BINARY']}{dryrun} > stdout 2>&1
+VASP_EOF
+    chmod +x "$d/run_vasp.sh"
+done
+echo "[raman_prep] $(ls -d ra_pos_* | wc -l) dirs created"
+"""
+    return s
+
+
+def emit_post_process(cfg, b):
+    energies = b["ENERGIES"] or "0.00"
+    first_e = energies.split()[0]
+    copyback = ""
+    if b["HOME_OUTPUT_DIR"]:
+        copyback = f'mkdir -p "{b["HOME_OUTPUT_DIR"]}"; cp -r ../output/. "{b["HOME_OUTPUT_DIR"]}/"\n'
+    sym_filter = ""
+    if b["SYM_ENABLED"]:
+        sym_filter = (
+            f'    awk \'BEGIN{{split("{b["SYM_IRREPS"]}",a," ");for(i in a)ok[a[i]]=1}} ok[$NF]\' '
+            f'"Raman_intensity_complex_${{eV}}eV" > "${{eV}}eV/filtered.dat" 2>/dev/null || true\n'
+        )
+    plot = ""
+    if b["SPECTROPY"]:
+        # generate_raman_plots.py writes one Raman_plot_styled_<source-name>.png
+        # per Raman_intensity_polarization_averaged_<eV>eV file it finds (one
+        # per desired_energies entry) -- glob-copy all of them, not a single
+        # fixed name.
+        plot = (
+            f"printf '5.0\\nl\\n' | python3 {b['SPECTROPY']}/generate_raman_plots.py "
+            f"&& cp Raman_plot_styled_*.png ../output/raman_spectra/ 2>/dev/null "
+            f'|| echo "[post] WARNING: plotting skipped"\n'
+        )
+    s = _header()
+    s += f"""BIN="{b['BIN']}"
+DONE="../output/raman_data/Raman_intensity_complex_{first_e}eV"
+
+case "${{1:-}}" in
+  --check)   [ -s "$DONE" ] && exit 0 || exit 1 ;;
+  --restart) rm -rf ./*eV ../output epsilon_derivative_* epsilon_derivative epsilon_derivative_all_atom Raman_tensor Raman_intensity_complex* Raman_intensity_polarization_averaged* input; exit 0 ;;
+esac
+if [ -s "$DONE" ]; then
+    echo "[post_process] already complete"; exit 0
+fi
+
+# epsilon_derivative reads ra_pos_*/vasprun.xml directly (no more Kopia/AXML
+# copy step) and raman_tensor reads band.yaml/irreps.yaml from its own cwd
+# (this dir), not ../hf where phonon_post actually wrote them -- copy them in.
+for f in band.yaml irreps.yaml; do
+    [ -s "../hf/$f" ] && cp "../hf/$f" .
+done
+[ -s band.yaml ] || {{ echo "[post] FATAL: band.yaml missing/empty — phonon_post did not complete" >&2; exit 1; }}
+
+export PATH="$BIN:$PATH"
+mkdir -p ../output/raman_data ../output/raman_spectra
+
+# raman_tensor reads polarization/surface-normal from "input" if present, else
+# prompts on stdin (and writes "input" itself) -- write it once up front so
+# every energy in the loop below reuses it without an interactive prompt.
+[ -s input ] || cat > input <<POL
+{b['INCIDENT_POL']}
+{b['SCATTERED_POL']}
+{b['SURFACE_NORMAL']}
+POL
+
+for eV in {energies}; do
+    [ -s "epsilon_derivative_${{eV}}" ] || echo "$eV" | epsilon_derivative
+    [ -s "epsilon_derivative_${{eV}}" ] || {{ echo "[post] FATAL: epsilon_derivative_${{eV}} not produced" >&2; exit 1; }}
+    cp "epsilon_derivative_${{eV}}" epsilon_derivative
+    raman_tensor
+    mv Raman_intensity_complex "Raman_intensity_complex_${{eV}}eV" 2>/dev/null || true
+    mv Raman_intensity_polarization_averaged "Raman_intensity_polarization_averaged_${{eV}}eV" 2>/dev/null || true
+    mkdir -p "${{eV}}eV"
+{sym_filter}    cp "Raman_intensity_complex_${{eV}}eV" ../output/raman_data/ 2>/dev/null || true
+    cp "Raman_intensity_polarization_averaged_${{eV}}eV" ../output/raman_data/ 2>/dev/null || true
+done
+
+{plot}for f in band.yaml irreps.yaml; do [ -s "../hf/$f" ] && cp "../hf/$f" ../output/; done
+{copyback}echo "[post_process] done"
+"""
+    return s
+
+
+def emit_run_all(cfg, b, active_steps, work_dir):
+    """The runner. Driven by whether this compute_mode's YAML block defines any
+    sbatch/sbatch_relax/sbatch_post -- not by the mode's name. If it does,
+    compute steps are grouped under sbatch --wait phases; if none are set,
+    everything runs inline (e.g. inside an existing interactive allocation)."""
+    mode = b["COMPUTE_MODE"]
+    use_sbatch = bool(b["SBATCH_RELAX"] or b["SBATCH_MAIN"] or b["SBATCH_POST"])
+    name = os.path.basename(work_dir)
+    lines = ['#!/bin/bash', 'set -euo pipefail', 'cd "$(dirname "$0")"',
+             f'source {COMMON_SH}', '',
+             f'# Runner for {name}  |  mode: {mode}  |  generated by generate.py',
+             '# Edit the sbatch lines to regroup allocations.', '']
+
+    # map step name -> script path
+    def path(step):
+        if step == "scf_relax":
+            return "scf/run_relax.sh"
+        if step == "defect_relax_1":
+            return "scf/run_defect_relax_1.sh"
+        if step in ("supercell", "hf_setup", "force_consts", "phonon_post"):
+            return f"hf/run_{step}.sh"
+        return f"raman/run_{step}.sh"
+
+    if use_sbatch:
+        # relax phase
+        relax_steps = [s for s in active_steps if s in ("scf_relax", "supercell", "defect_relax_1")]
+        # force_consts, phonon_post, raman_prep, resonant_vasp all stay in ONE
+        # allocation (one queue wait) but must run in this exact order:
+        # resonant_vasp needs raman_prep's ra_pos_* dirs, raman_prep needs
+        # phonon_post's output, phonon_post needs force_consts' vasprun.xml.
+        # phonon_post/raman_prep are login-safe (no srun) but run fine inside
+        # a GPU allocation too, so bundling them here costs nothing and saves
+        # a second queue wait.
+        main_steps = [s for s in active_steps
+                      if s in ("force_consts", "phonon_post", "raman_prep", "resonant_vasp")]
+        post = [s for s in active_steps if s == "post_process"]
+
+        def phase(steps, sbatch_args, jobname):
+            step_paths = " ".join(path(st) for st in steps)
+            body_lines = "\n".join(f"run_until_complete {path(st)}" for st in steps)
+            # Resubmits the whole sbatch --wait phase if it comes back without
+            # every step done -- a Slurm TIMEOUT kills the entire allocation,
+            # including run_until_complete's own retry loop, so that inner
+            # loop alone can't survive a wall-time kill. phase_steps_done
+            # re-checks first so an already-finished phase (or one where
+            # earlier steps checkpointed before the timeout) doesn't resubmit
+            # work it doesn't need to. Bounded by MAX_PHASE_RETRIES so a
+            # genuinely broken phase still aborts loudly instead of looping.
+            out = [f': "${{MAX_PHASE_RETRIES:=10}}"',
+                   f'phase_tries=0',
+                   f'until phase_steps_done {step_paths}; do',
+                   f'    if (( phase_tries >= MAX_PHASE_RETRIES )); then',
+                   f'        echo "FATAL: {jobname} phase did not complete after '
+                   f'$MAX_PHASE_RETRIES sbatch submissions" >&2',
+                   f'        exit 1',
+                   f'    fi',
+                   f'    phase_tries=$(( phase_tries + 1 ))',
+                   f'    echo "=== {jobname}: submitting sbatch (phase attempt '
+                   f'$phase_tries) at $(date \'+%H:%M:%S\') ==="',
+                   f'    sbatch --wait {sbatch_args} --requeue -J {jobname} '
+                   f'--mail-type=BEGIN,FAIL,END --mail-user=easuresh@mit.edu <<PHASE',
+                   "#!/bin/bash",
+                   f'cd {work_dir} && source {COMMON_SH}',
+                   body_lines,
+                   "PHASE",
+                   f'    echo "=== {jobname}: sbatch --wait returned at '
+                   f'$(date \'+%H:%M:%S\') ==="',
+                   'done']
+            return "\n".join(out)
+
+        if relax_steps:
+            lines.append("# ── relax (own allocation; hf_setup needs its output) ──")
+            lines.append(phase(relax_steps, b["SBATCH_RELAX"], f"relax_{name}"))
+            lines.append("")
+        if "hf_setup" in active_steps:
+            lines.append(f"run_until_complete {path('hf_setup')}   # login")
+        if main_steps:
+            lines.append("")
+            lines.append("# ── main compute (one allocation: force_consts -> phonon_post -> "
+                         "raman_prep -> resonant_vasp) ──")
+            lines.append(phase(main_steps, b["SBATCH_MAIN"], f"main_{name}"))
+            lines.append("")
+        if post:
+            lines.append("")
+            lines.append("# ── post-process (small allocation) ──")
+            lines.append(phase(post, b["SBATCH_POST"], f"post_{name}"))
+    else:  # no sbatch config for this mode
+        lines.append(f"# {mode}: no sbatch config -- already inside an allocation, run inline")
+        for st in active_steps:
+            lines.append(f"run_until_complete {path(st)}")
+
+    lines.append("")
+    lines.append('echo "Pipeline complete."')
+    return "\n".join(lines) + "\n"
+
+
+# =============================================================================
+#  Driver
+# =============================================================================
+def write(path, content, executable=True):
+    with open(path, "w") as f:
+        f.write(content)
+    if executable:
+        os.chmod(path, 0o755)
+    print(f"  wrote {path}")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("material_dir")
+    ap.add_argument("--no-scratch", dest="scratch", action="store_false",
+                    help="run in the material dir instead of $SCRATCH (scratch is the default)")
+    ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--debug", action="store_true", help="append VASP --dry-run to every VASP call")
+    ap.add_argument("--shared", default=os.path.join(
+        os.environ.get("RAMAN_PROJECT_DIR", os.path.dirname(REPO_NEW)),
+        "shared_workflow_settings.yaml"))
+    ap.set_defaults(scratch=True)
+    args = ap.parse_args()
+
+    material_dir = os.path.abspath(args.material_dir)
+    per_material = os.path.join(material_dir, "input", "workflow_settings.yaml")
+
+    # capture ordered step list from the per-material file before merge
+    step_order_from_file = []
+    if os.path.exists(per_material):
+        with open(per_material) as f:
+            raw = yaml.safe_load(f) or {}
+        step_order_from_file = list((raw.get("steps") or {}).keys())
+
+    cfg = load_config([args.shared, per_material])
+    active_steps = step_order_from_file or STEP_ORDER
+    validate_config(cfg, active_steps)
+
+    name = os.path.basename(material_dir)
+    # Base work dir: $SCRATCH by default, material dir with --no-scratch.
+    if args.scratch:
+        scratch = os.environ.get("SCRATCH", "")
+        if not scratch:
+            sys.exit("ERROR: default is scratch mode but $SCRATCH is unset; "
+                     "pass --no-scratch to run in the material dir.")
+        base_dir = os.path.join(scratch, "vasp_calculations", name)
+    else:
+        base_dir = material_dir
+    # --debug nests a throwaway tree under the base so it never touches real data.
+    work_dir = os.path.join(base_dir, "debug") if args.debug else base_dir
+
+    # Whenever the work dir isn't the material dir itself, create an `input`
+    # symlink so the scripts find POSCAR/POTCAR, and (non-debug) bake the
+    # HOME_OUTPUT_DIR so post_process copies results back to $HOME.
+    home_output = ""
+    if work_dir != material_dir:
+        os.makedirs(work_dir, exist_ok=True)
+        link = os.path.join(work_dir, "input")
+        if os.path.islink(link):
+            os.unlink(link)
+        if not os.path.exists(link):
+            os.symlink(os.path.join(material_dir, "input"), link)
+        if not args.debug:
+            home_output = os.path.join(material_dir, "output")
+
+    b = build_bake(cfg, args.cpu, home_output)
+
+    # validate binaries exist
+    if not b["VASP_BINARY"] or not os.path.isfile(b["VASP_BINARY"]):
+        sys.exit(f"ERROR: VASP binary not found: {b['VASP_BINARY']!r}")
+    if not os.path.isdir(b["BIN"]):
+        sys.exit(f"ERROR: binary_utilities_dir not found: {b['BIN']!r}")
+
+    print(f"\nGenerating pipeline for {name}")
+    print(f"  work_dir: {work_dir}")
+    print(f"  mode: {b['COMPUTE_MODE']}  steps: {active_steps}\n")
+
+    for sub in ("scf", "hf", "raman"):
+        os.makedirs(os.path.join(work_dir, sub), exist_ok=True)
+
+    # ── Write static VASP/phonopy input files up front, once, as real files ──
+    # (INCAR/KPOINTS/symmetry.conf/eigenvectors.conf) instead of heredoc-ing them
+    # inside the generated bash. Inspectable/editable directly; the scripts just
+    # verify they exist before running.
+    if "scf_relax" in active_steps and "defect_relax_1" in active_steps:
+        sys.exit("ERROR: scf_relax and defect_relax_1 can't both be active -- "
+                  "they'd overwrite each other's scf/INCAR and scf/KPOINTS "
+                  "(both run in the same scf/ directory). Use one or the other.")
+    if "scf_relax" in active_steps:
+        write(os.path.join(work_dir, "scf", "INCAR"),
+              build_incar_content(cfg, "scf_relax"), executable=False)
+        write(os.path.join(work_dir, "scf", "KPOINTS"),
+              kpoints_content("K-points", b["SCF_MESH"], b["SCF_SHIFT"]), executable=False)
+    if "defect_relax_1" in active_steps:
+        write(os.path.join(work_dir, "scf", "INCAR"),
+              build_incar_content(cfg, "defect_relax_1"), executable=False)
+        write(os.path.join(work_dir, "scf", "KPOINTS"),
+              kpoints_content("K-points", b["DEFECT_MESH"], b["DEFECT_SHIFT"]), executable=False)
+    if "hf_setup" in active_steps:
+        write(os.path.join(work_dir, "hf", "INCAR"),
+              build_incar_content(cfg, "force_consts"), executable=False)
+        write(os.path.join(work_dir, "hf", "KPOINTS"),
+              kpoints_content("K-points", b["HF_MESH"], b["HF_SHIFT"]), executable=False)
+        write(os.path.join(work_dir, "hf", "symmetry.conf"),
+              symmetry_conf(b["PHONOPY_DIM"]), executable=False)
+    if "phonon_post" in active_steps:
+        write(os.path.join(work_dir, "hf", "eigenvectors.conf"),
+              eigenvectors_conf(b), executable=False)
+        write(os.path.join(work_dir, "hf", "symmetry.conf"),
+              symmetry_conf(b["PHONOPY_DIM"]), executable=False)
+    if "raman_prep" in active_steps:
+        write(os.path.join(work_dir, "raman", "INCAR"),
+              build_incar_content(cfg, "resonant_vasp"), executable=False)
+        write(os.path.join(work_dir, "raman", "KPOINTS"),
+              kpoints_content("K-points", b["RAMAN_MESH"], b["RAMAN_SHIFT"]), executable=False)
+
+    # emit step scripts
+    if "scf_relax" in active_steps:
+        write(os.path.join(work_dir, "scf", "run_relax.sh"),
+              emit_relax(cfg, b, "scf_relax", "scf", args.debug))
+    if "defect_relax_1" in active_steps:
+        write(os.path.join(work_dir, "scf", "run_defect_relax_1.sh"),
+              emit_relax(cfg, b, "defect_relax_1", "scf", args.debug))
+    if "supercell" in active_steps:
+        write(os.path.join(work_dir, "hf", "run_supercell.sh"),
+              emit_supercell(cfg, b, args.debug))
+    if "hf_setup" in active_steps:
+        write(os.path.join(work_dir, "hf", "run_hf_setup.sh"),
+              emit_hf_setup(cfg, b, args.debug))
+    if "force_consts" in active_steps:
+        write(os.path.join(work_dir, "hf", "run_force_consts.sh"),
+              emit_dir_loop(b, "hf_POSCAR-*", "relaxation.stdout", dielectric=False))
+    if "phonon_post" in active_steps:
+        write(os.path.join(work_dir, "hf", "run_phonon_post.sh"),
+              emit_phonon_post(cfg, b))
+    if "raman_prep" in active_steps:
+        write(os.path.join(work_dir, "raman", "run_raman_prep.sh"),
+              emit_raman_prep(cfg, b, args.debug))
+    if "resonant_vasp" in active_steps:
+        write(os.path.join(work_dir, "raman", "run_resonant_vasp.sh"),
+              emit_dir_loop(b, "ra_pos_*", "stdout", dielectric=True))
+    if "post_process" in active_steps:
+        write(os.path.join(work_dir, "raman", "run_post_process.sh"),
+              emit_post_process(cfg, b))
+
+    write(os.path.join(work_dir, "run_all.sh"),
+          emit_run_all(cfg, b, active_steps, work_dir))
+
+    print(f"\nDone. Run:  bash {os.path.join(work_dir, 'run_all.sh')}")
+
+
+if __name__ == "__main__":
+    main()
