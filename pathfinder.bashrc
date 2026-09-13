@@ -15,13 +15,13 @@
 # conda.sh is real and importable as-is.
 export CONDA_INIT="/software/baseline/nsp/miniforge3/24.11.3-0/etc/profile.d/conda.sh"
 
-# TODO: no phonopy env exists anywhere discoverable yet (checked the base
-# miniforge install and /projects/hpcl-mat269/users/jyw/CONDA_ENVIRONMENTS/*
-# -- neither has phonopy). Create one (e.g. under
-# /projects/hpcl-mat269/proj-shared/, alongside vasp_bin/ and raman_utility/)
-# with phonopy + PyYAML (+ h5py/py4vasp for check_dielectric.py), then point
-# this at it.
-export CONDA_ENV="/TODO/pathfinder/phonopy_env"
+# Built at ~/phonopy_env (a plain venv, not a conda env despite the var name --
+# conda-meta/ absence is how common.sh/generate.py's CONDA_ENV activation
+# logic detects this and falls back to `source $CONDA_ENV/bin/activate`).
+# Has phonopy + PyYAML + SpectroPy (pip install '.[all]' from ~/SpectroPy) --
+# raman_prep/post_process depend on SpectroPy since it replaced the Fortran
+# raman_utility displacement/derivative/spectrum chain.
+export CONDA_ENV="$HOME/phonopy_env"
 
 # Liangbo's working job script (2026-07-27) loads exactly this, to run the
 # CPU/MPI vasp_std below -- confirmed by `ldd vasp_std` needing

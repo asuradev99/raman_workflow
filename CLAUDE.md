@@ -69,25 +69,41 @@ already-inside-an-allocation mode. See `MoS2`/`MoS2_nosym`'s
 `workflow_settings.yaml` for the Pathfinder-recommended `sbatch_mix_*`
 settings (from Liangbo).
 
-### Symmetry-reduced Raman step
+### Raman step is SpectroPy-driven, not the Fortran raman_utility binaries
 
-`raman_prep` follows Liangbo's symmetry-reduced procedure: `phonopy
---symmetry` → `raman_symmetry_mapping` → `raman_dis`/`raman_dis_nosym` →
-`raman_poscar` → `bash run_raman` → VASP → `epsilon_derivative` →
-`raman_tensor`. Toggle with `steps.raman_prep.use_symmetry` (default
-`true`); `false` runs the full non-symmetry-reduced `raman_dis_nosym` path
-instead — make this explicit in a material's `workflow_settings.yaml`
-whenever `false` is used (comment it in, don't just omit the key), since the
-default elsewhere is `true`.
+`raman_prep`/`post_process` used to shell out to Liangbo's Fortran chain
+(`raman_symmetry_mapping` → `raman_dis`/`raman_dis_nosym` → `raman_poscar` →
+`epsilon_derivative` → `raman_tensor`). That chain has been replaced with
+`~/SpectroPy/` (installed into `$CONDA_ENV` via `pip install '.[all]'` — see
+its own README for the full CLI/library reference):
 
-Note `raman_dis`/`raman_symmetry_mapping` only reduce **atom count** (via
-the space group — skip displacing an atom that's a symmetry-image of one
-already displaced) — they do *not* further reduce **direction count** per
-atom via that atom's own site symmetry, which is generally possible too (see
-`~/SpectroPy/generate_minimal_displacements.py`, built as an independent,
-more aggressive alternative using phonopy's own `generate_displacements()` —
-not yet wired into this pipeline's `raman_prep` step, kept as a separate
-tool for now; `MoS2_fullsym` in `vasp_calculations/` is its test bed).
+- `raman_prep` (`emit_raman_prep`): `phonopy --symmetry -c CONTCAR >
+  symmetry`, then either `generate_minimal_displacements.py` (`use_symmetry:
+  true`, the default — Phonopy's own `generate_displacements()`, reducing
+  both atom count *and* per-atom direction count via site symmetry, deeper
+  than the old `raman_dis` ever did) or `create_displacements.py`
+  (`use_symmetry: false` — full, unreduced +/-x/y/z for every atom). Both
+  write `ra_pos_atom<N><suffix>/POSCAR`; the generated script then copies
+  INCAR/KPOINTS/POTCAR into each (SpectroPy deliberately doesn't prescribe a
+  DFT setup, so this repo still owns that part) and writes each dir's
+  `run_vasp.sh`.
+- `post_process` (`emit_post_process`): writes SpectroPy's non-interactive
+  `input` file (polarization + `laser_energies:`/`broadening_fwhm:`/
+  `broadening_type:`, read from `steps.post_process.raman_tensor.*` and
+  `steps.post_process.broadening_fwhm`/`broadening_type`, default 5.0 cm-1
+  Lorentzian), then runs `spectropy derivatives` (dielectric-derivative
+  reconstruction, including symmetry-equivalent-atom expansion) →
+  `spectropy spectrum` (mode Raman tensors/intensities) → `spectropy plot`
+  (broadened plots). Toggle `steps.raman_prep.use_symmetry` explicitly in a
+  material's `workflow_settings.yaml` when set to `false` (comment it in,
+  don't just omit the key), since the default elsewhere is `true`.
+
+Dropped, not yet replaced: the old `symmetry_filter`/`allowed_irreps`
+output-filtering feature — SpectroPy's `Raman_intensity_complex_<eV>eV`
+files don't carry an irrep column the way the Fortran binary's did, so the
+awk-based filter would silently produce empty output; it's been removed
+rather than left broken. Re-add if/when irrep labels are threaded through
+SpectroPy's output.
 
 ### Step order and allocation grouping
 
@@ -131,10 +147,10 @@ back without a concrete, observed failure mode that needs them.
   diagnose — always end such a function body with `|| true` or an explicit
   `if`. When a generated step script produces *no output at all* on
   failure, suspect this before suspecting Slurm/srun policy issues.
-- `epsilon_derivative`/`raman_tensor` (in `post_process`) read
+- SpectroPy's `derivatives`/`spectrum` stages (in `post_process`) read
   `band.yaml`/`irreps.yaml` from their own **current directory**, not from
   `hf/` where `phonon_post` actually wrote them — they must be copied into
-  `raman/` before the energy loop runs, not after.
+  `raman/` before running, not after.
 - `emit_hf_setup`'s source directory for `CONTCAR` depends on
   `start_from_supercell`: `../scf` if true (the defect-relax path already
   produced the full supercell), or `.` if false (a separate `supercell`
@@ -169,33 +185,45 @@ back without a concrete, observed failure mode that needs them.
   work directory — copy to a scratch/tmp location first, or it pollutes
   the real run's output files.
 
-## `~/SpectroPy/` — Python replacements/extensions, independent of this pipeline
+## `~/SpectroPy/` — the pipeline's Raman displacement/derivative/spectrum engine
 
-A separate, standalone toolchain (not sourced or called by generate.py's
-generated scripts) exploring pure-Python alternatives to the Fortran
-`raman_utility` binaries `generate.py`'s `raman_prep`/`post_process`
-steps call:
+Installed into `$CONDA_ENV` (`pip install '.[all]'` from a checkout — see its
+own README for the full CLI/library reference) and invoked by `generate.py`'s
+`raman_prep`/`post_process` steps (see "Raman step is SpectroPy-driven"
+above) in place of the old Fortran `raman_utility` binaries. Independently
+checked out and versioned from this repo — not vendored in.
+
+Key pieces, for when something in the Raman step needs debugging:
 
 - `process_symmetry.py` — parses phonopy's `--symmetry` output (real YAML)
-  for atom-equivalence mapping and per-atom site symmetry; reimplements what
-  `raman_symmetry_mapping` computes.
-- `generate_minimal_displacements.py` — phonopy's own `generate_displacements()`
-  (not a hand-rolled reimplementation) for the *true* minimal per-atom
-  displacement set, which can be smaller than what `raman_dis` currently
-  produces (see "Symmetry-reduced Raman step" above).
+  for atom-equivalence mapping and per-atom site symmetry.
+- `generate_minimal_displacements.py` / `create_displacements.py` /
+  `generate_atom_displacements.py` — the `minimal`/`full`/`atoms` displacement
+  modes (`spectropy displacements --mode ...`); `prepare_vasp_inputs.py`
+  turns `full`/`atoms` mode's `displacements.dat` into `ra_pos_atom*/POSCAR`
+  dirs (`generate_minimal_displacements.py` does this itself).
 - `reconstruct_dielectric_derivatives.py` — reconstructs a full per-atom
-  D_ijk tensor from that reduced set via the atom's own site symmetry
-  (tensor rotation law), and expands to symmetry-equivalent atoms via
-  `process_symmetry.py`'s mapping matrices.
+  D_ijk tensor from a reduced displacement set via the atom's own site
+  symmetry (tensor rotation law), and expands to symmetry-equivalent atoms
+  via `process_symmetry.py`'s mapping matrices.
 - `calculate_dielectric_derivatives.py` / `calculate_spectrum.py` — the rest
   of the chain (vasprun.xml → D_ijk → mode Raman tensors/intensities),
-  supporting a variable number of displacements per atom.
-- `generate_raman_plots.py` — broadened Raman spectrum plots from
-  `raman_tensor`'s intensity output.
+  reading laser energies/polarization non-interactively from `input`.
+- `generate_raman_plots.py` — broadened Raman spectrum plots, also
+  non-interactive via `input`'s `broadening_fwhm`/`broadening_type`.
+- `spectropy_cli.py` — the installed `spectropy` command wrapping all of the
+  above (`displacements`/`derivatives`/`spectrum`/`plot`).
 
-None of this is validated against real converged DFT data as a matter of
-course — cross-check against a brute-force (no-symmetry) run before trusting
-results from a reduced displacement set.
+Cross-check against a brute-force (`use_symmetry: false`) run before trusting
+results from a reduced (`use_symmetry: true`) displacement set on a new
+material — `MoS2_fullsym` in `vasp_calculations/` is a real test bed for
+exactly this, and this session's validation surfaced at least one real
+finding worth knowing about: a completed real DFT calculation can fail to
+respect its own crystal's site symmetry (checked three independent ways on
+MoS2's data, ruling out a code/parsing bug) — the *reduced* displacement set
+is actually more trustworthy in that sense, since its missing components are
+*derived* from symmetry rather than independently (and potentially
+inconsistently) computed by DFT.
 
 ## `post/` — analysis and visualization, works with either pipeline's output
 

@@ -203,6 +203,8 @@ def build_bake(cfg, cpu_flag, home_output_dir):
         "SBATCH_RELAX": mode_cfg.get("sbatch_relax", "") or mode_cfg.get("sbatch", ""),
         "SBATCH_MAIN": mode_cfg.get("sbatch", ""),
         "SBATCH_POST": mode_cfg.get("sbatch_post", "") or mode_cfg.get("sbatch", ""),
+        "SBATCH_ARRAY": mode_cfg.get("sbatch_array", ""),
+        "ARRAY_MAX_CONCURRENT": int(mode_cfg.get("array_max_concurrent", 1)),
         "START_FROM_SUPERCELL": cfg.get("start_from_supercell", False),
         "HOME_OUTPUT_DIR": home_output_dir or "",
         # kpoints per step
@@ -223,9 +225,6 @@ def build_bake(cfg, cpu_flag, home_output_dir):
         "SURFACE_NORMAL": rt.get("surface_normal", "z"),
         "SYM_ENABLED": symf.get("enabled", False),
         "SYM_IRREPS": " ".join(symf.get("allowed_irreps", ["A1'", "E'"])),
-        # raman_prep: symmetry-reduced displacement generation (see Liangbo's
-        # 2026-07-27 email). use_symmetry picks raman_dis vs raman_dis_nosym;
-        # unrelated to SYM_ENABLED above, which filters *output* by irrep.
         "RAMAN_USE_SYMMETRY": rp.get("use_symmetry", True),
         "RAMAN_DISPLACEMENT": rp.get("displacement", default_displacement),
         # eigenvectors / viz
@@ -430,6 +429,47 @@ def emit_dir_loop(b, glob, log, dielectric):
     if dielectric:
         diel = f'    python3 {CHECK_DIEL} "$d" || {{ echo "[FATAL] $d no Im(ε)" >&2; exit 1; }}\n'
     s = _header()
+    if b["SBATCH_ARRAY"]:
+        array_name = "hf" if glob.startswith("hf_") else "raman"
+        s += f"""
+CHECK="python3 {CHECK_CONV} --static"
+check_all() {{ local d; for d in {glob}; do $CHECK "$d" >/dev/null 2>&1 || return 1; done; }}
+
+case "${{1:-}}" in
+  --check)   check_all && exit 0 || exit 1 ;;
+  --restart) for d in {glob}; do rm -f "$d"/{{OUTCAR,CONTCAR,OSZICAR,vasprun.xml,vaspout.h5,{log}}}; done; exit 0 ;;
+esac
+check_all && {{ echo "[dispatch] already complete"; exit 0; }}
+
+dirs=()
+for d in {glob}; do
+    [ -d "$d" ] || continue
+    $CHECK "$d" >/dev/null 2>&1 || dirs+=("$d")
+done
+((${{#dirs[@]}})) || {{ echo "[dispatch] no unfinished directories"; exit 0; }}
+
+manifest="$PWD/.{array_name}_array_dirs"
+printf '%s\\n' "${{dirs[@]}}" > "$manifest"
+last=$((${{#dirs[@]}} - 1))
+echo "[dispatch] submitting ${{#dirs[@]}} one-node jobs, up to {b['ARRAY_MAX_CONCURRENT']} at once"
+sbatch --wait {b['SBATCH_ARRAY']} --array="0-${{last}}%{b['ARRAY_MAX_CONCURRENT']}" -J {array_name}_dirs \
+    --export=ALL,SUBMIT_DIR="$PWD",DIR_MANIFEST="$manifest" <<'ARRAY_EOF'
+#!/bin/bash
+set -euo pipefail
+cd "$SUBMIT_DIR"
+mapfile -t dirs < "$DIR_MANIFEST"
+d="${{dirs[$SLURM_ARRAY_TASK_ID]}}"
+echo "[array $SLURM_ARRAY_JOB_ID/$SLURM_ARRAY_TASK_ID] $d"
+bash "$d/run_vasp.sh"
+ARRAY_EOF
+
+for d in {glob}; do
+    $CHECK "$d" >/dev/null 2>&1 || {{ echo "[FATAL] $d did not converge" >&2; exit 1; }}
+{diel}done
+rm -f "$manifest"
+echo "[dispatch] all directories converged"
+"""
+        return s
     s += f"""
 CHECK="python3 {CHECK_CONV} --static"
 check_all() {{ local d; for d in {glob}; do $CHECK "$d" >/dev/null 2>&1 || return 1; done; }}
@@ -498,17 +538,6 @@ def emit_raman_prep(cfg, b, debug):
     incar = build_incar_content(cfg, "resonant_vasp")
     kpts = kpoints_content("K-points", b["RAMAN_MESH"], b["RAMAN_SHIFT"])
     dryrun = " --dry-run" if debug else ""
-    # Liangbo's 2026-07-27 email: ramdiscar/genRApos610/runRA are replaced by
-    # raman_dis(_nosym)/raman_poscar + the run_raman script raman_poscar itself
-    # writes. Displacement generation is now symmetry-reduced by default (only
-    # non-equivalent atoms get displaced) -- raman_dis needs a "symmetry" file
-    # from `phonopy --symmetry` plus raman_symmetry_mapping's atom-mapping
-    # output (symmetry_operation_matrices); raman_dis_nosym needs neither and
-    # displaces every atom. Either way raman_poscar writes pos_* displacement
-    # files *and* generates a run_raman script that turns each pos_* into a
-    # full ra_pos_*/ VASP directory (POSCAR + symlinked KPOINTS/POTCAR/INCAR/
-    # CHGCAR/WAVECAR) -- but run_raman's own $VASP launch line ships commented
-    # out, so we still write our own run_vasp.sh per ra_pos_* dir below.
     dis_binary = "raman_dis" if b["RAMAN_USE_SYMMETRY"] else "raman_dis_nosym"
     s = _header()
     s += f"""
@@ -561,12 +590,8 @@ def emit_post_process(cfg, b):
         )
     plot = ""
     if b["SPECTROPY"]:
-        # generate_raman_plots.py writes one Raman_plot_styled_<source-name>.png
-        # per Raman_intensity_polarization_averaged_<eV>eV file it finds (one
-        # per desired_energies entry) -- glob-copy all of them, not a single
-        # fixed name.
         plot = (
-            f"printf '5.0\\nl\\n' | python3 {b['SPECTROPY']}/generate_raman_plots.py "
+            f"printf '5.0\\nl\\n' | python3 {b['SPECTROPY']}/src/generate_raman_plots.py "
             f"&& cp Raman_plot_styled_*.png ../output/raman_spectra/ 2>/dev/null "
             f'|| echo "[post] WARNING: plotting skipped"\n'
         )
@@ -582,9 +607,6 @@ if [ -s "$DONE" ]; then
     echo "[post_process] already complete"; exit 0
 fi
 
-# epsilon_derivative reads ra_pos_*/vasprun.xml directly (no more Kopia/AXML
-# copy step) and raman_tensor reads band.yaml/irreps.yaml from its own cwd
-# (this dir), not ../hf where phonon_post actually wrote them -- copy them in.
 for f in band.yaml irreps.yaml; do
     [ -s "../hf/$f" ] && cp "../hf/$f" .
 done
@@ -593,9 +615,6 @@ done
 export PATH="$BIN:$PATH"
 mkdir -p ../output/raman_data ../output/raman_spectra
 
-# raman_tensor reads polarization/surface-normal from "input" if present, else
-# prompts on stdin (and writes "input" itself) -- write it once up front so
-# every energy in the loop below reuses it without an interactive prompt.
 [ -s input ] || cat > input <<POL
 {b['INCIDENT_POL']}
 {b['SCATTERED_POL']}
@@ -626,7 +645,7 @@ def emit_run_all(cfg, b, active_steps, work_dir):
     compute steps are grouped under sbatch --wait phases; if none are set,
     everything runs inline (e.g. inside an existing interactive allocation)."""
     mode = b["COMPUTE_MODE"]
-    use_sbatch = bool(b["SBATCH_RELAX"] or b["SBATCH_MAIN"] or b["SBATCH_POST"])
+    use_sbatch = bool(b["SBATCH_RELAX"] or b["SBATCH_MAIN"] or b["SBATCH_POST"] or b["SBATCH_ARRAY"])
     name = os.path.basename(work_dir)
     lines = ['#!/bin/bash', 'set -euo pipefail', 'cd "$(dirname "$0")"',
              f'source {COMMON_SH}', '',
@@ -698,9 +717,14 @@ def emit_run_all(cfg, b, active_steps, work_dir):
             lines.append(f"run_until_complete {path('hf_setup')}   # login")
         if main_steps:
             lines.append("")
-            lines.append("# ── main compute (one allocation: force_consts -> phonon_post -> "
-                         "raman_prep -> resonant_vasp) ──")
-            lines.append(phase(main_steps, b["SBATCH_MAIN"], f"main_{name}"))
+            if b["SBATCH_ARRAY"]:
+                lines.append("# ── main compute (directory steps submit one-node job arrays) ──")
+                for st in main_steps:
+                    lines.append(f"run_until_complete {path(st)}")
+            else:
+                lines.append("# ── main compute (one allocation: force_consts -> phonon_post -> "
+                             "raman_prep -> resonant_vasp) ──")
+                lines.append(phase(main_steps, b["SBATCH_MAIN"], f"main_{name}"))
             lines.append("")
         if post:
             lines.append("")

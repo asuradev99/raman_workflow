@@ -156,6 +156,9 @@ if [ -d "$CONDA_ENV" ]; then
         "$CONDA_ENV/bin/python3" -c "import yaml" 2>/dev/null \
             && echo "      OK   PyYAML importable" \
             || { echo "      MISSING PyYAML in $CONDA_ENV — pip/conda install pyyaml there"; problems=$((problems + 1)); }
+        "$CONDA_ENV/bin/python3" -c "import spectropy_cli" 2>/dev/null \
+            && echo "      OK   SpectroPy importable (raman_prep/post_process depend on it)" \
+            || echo "      NOTE SpectroPy not installed in $CONDA_ENV — needed for raman_prep/post_process: cd \$SPECTROPY_DIR && $CONDA_ENV/bin/python3 -m pip install '.[all]'"
     fi
 else
     echo "      MISSING conda env: $CONDA_ENV (edit $CLUSTER.bashrc / rerun with --conda-env)"
