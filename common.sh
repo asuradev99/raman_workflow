@@ -35,21 +35,19 @@ if [ -z "${CONDA_ENV:-}" ] || [ -z "${VASP_MODULES:-}" ]; then
     source ~/.bashrc
     set -u
 fi
-if [ -n "${CONDA_INIT:-}" ]; then
-    source "$CONDA_INIT"
+if [ ! -x "$CONDA_ENV/bin/python3" ]; then
+    echo "Python environment missing: $CONDA_ENV" >&2
+    return 1
 fi
-# CONDA_ENV may be a real conda environment (has conda-meta/, e.g. NERSC's
-# phonopy_env) or a plain `python3 -m venv` virtualenv (has bin/activate, no
-# conda-meta/ -- e.g. a Pathfinder env built via TB2J's venv-based install
-# recipe). `conda activate` errors out on the latter ("Not a conda
-# environment"), and venvs don't understand `conda activate` either, so pick
-# the one that actually applies instead of hardcoding either per cluster.
 if [ -d "$CONDA_ENV/conda-meta" ]; then
-    command -v conda >/dev/null 2>&1 || {
-        echo "CONDA_ENV is a Conda environment but conda is unavailable" >&2
-        return 1
-    }
-    conda activate "$CONDA_ENV"
+    if [ -n "${CONDA_INIT:-}" ]; then
+        source "$CONDA_INIT"
+    fi
+    if command -v conda >/dev/null 2>&1; then
+        conda activate "$CONDA_ENV"
+    else
+        export PATH="$CONDA_ENV/bin:$PATH"
+    fi
 else
     source "$CONDA_ENV/bin/activate"
 fi

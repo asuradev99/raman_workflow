@@ -51,14 +51,12 @@ bash install.sh pathfinder
 source ~/.bashrc
 ```
 
-NERSC uses a user-owned virtual environment. Create it once before running the installer:
+NERSC uses the existing shared Phonopy environment directly through `PATH`; it does not require `CONDA_PREFIX` to be set:
 
 ```bash
-python3 -m venv ~/phonopy_env
-source ~/phonopy_env/bin/activate
-python -m pip install --upgrade pip
-python -m pip install pyyaml
-python -m pip install -e "$HOME/SpectroPy[all]"
+export CONDA_ENV=/global/common/software/m526/phonopy_env
+export PATH="$CONDA_ENV/bin:$PATH"
+python3 -c 'import phonopy, yaml; print("OK")'
 ```
 
 The installer configures paths such as `RAMAN_PROJECT_DIR`, `CONDA_ENV`, `VASP_BINARY*`, `VASP_MODULES`, `BINARY_UTILITIES_DIR`, and `SPECTROPY_DIR`. `SCRATCH` must also be available in the shell environment; the Pathfinder profile defines it as `~/scratch`.

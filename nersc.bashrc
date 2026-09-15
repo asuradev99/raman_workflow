@@ -9,7 +9,7 @@
 #  installed.
 # =============================================================================
 export CONDA_INIT=""
-export CONDA_ENV="$HOME/phonopy_env"
+export CONDA_ENV="/global/common/software/m526/phonopy_env"
 export LIANGBO_SHARED_DIR="/global/cfs/cdirs/m526/liangbo"
 export VASP_MODULES="PrgEnv-nvidia gpu cray-hdf5 cray-fftw nccl/2.18.3-cu12 vasp/6.4.3-gpu"
 export VASP_BINARY="$LIANGBO_SHARED_DIR/bin/gpu/vasp_std"
