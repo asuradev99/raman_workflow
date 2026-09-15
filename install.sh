@@ -117,28 +117,33 @@ MARKER_BEGIN="# >>> raman_workflow install.sh >>>"
 MARKER_END="# <<< raman_workflow install.sh <<<"
 
 if [ -f "$BASHRC" ] && grep -qF "$MARKER_BEGIN" "$BASHRC"; then
-    echo "[2/4] .bashrc block already present — leaving it alone (edit by hand, or remove the"
-    echo "      block between '$MARKER_BEGIN' / '$MARKER_END' and re-run to regenerate)"
+    grep -qF "$MARKER_END" "$BASHRC" || {
+        echo "ERROR: $BASHRC has a workflow start marker but no end marker" >&2
+        exit 1
+    }
+    sed -i "\|$MARKER_BEGIN|,\|$MARKER_END|d" "$BASHRC"
+    bashrc_action="updated"
 else
-    {
-        echo "$MARKER_BEGIN"
-        echo "# cluster: $CLUSTER — see raman_workflow/$CLUSTER.bashrc"
-        echo "export RAMAN_PROJECT_DIR=\"$PROJECT_DIR\""
-        echo "export CONDA_INIT=\"$CONDA_INIT\""
-        echo "export CONDA_ENV=\"$CONDA_ENV\""
-        echo "export PATH=\"\$CONDA_ENV/bin:$REPO_DIR/scripts:\$PATH\""
-        echo "export LIANGBO_SHARED_DIR=\"$LIANGBO_SHARED_DIR\""
-        echo "export VASP_MODULES=\"$VASP_MODULES\""
-        echo "export VASP_BINARY=\"$VASP_BINARY\""
-        echo "export VASP_BINARY_CPU=\"$VASP_BINARY_CPU\""
-        echo "export VASP_BINARY_GAM=\"$VASP_BINARY_GAM\""
-        echo "export VASP_BINARY_GAM_CPU=\"$VASP_BINARY_GAM_CPU\""
-        echo "export BINARY_UTILITIES_DIR=\"$BINARY_UTILITIES_DIR\""
-        echo "export SPECTROPY_DIR=\"$SPECTROPY_DIR\""
-        echo "$MARKER_END"
-    } >> "$BASHRC"
-    echo "[2/4] appended env vars to $BASHRC — run 'source ~/.bashrc' or start a new shell"
+    bashrc_action="appended"
 fi
+{
+    echo "$MARKER_BEGIN"
+    echo "# cluster: $CLUSTER — see raman_workflow/$CLUSTER.bashrc"
+    echo "export RAMAN_PROJECT_DIR=\"$PROJECT_DIR\""
+    echo "export CONDA_INIT=\"$CONDA_INIT\""
+    echo "export CONDA_ENV=\"$CONDA_ENV\""
+    echo "export PATH=\"\$CONDA_ENV/bin:$REPO_DIR/scripts:\$PATH\""
+    echo "export LIANGBO_SHARED_DIR=\"$LIANGBO_SHARED_DIR\""
+    echo "export VASP_MODULES=\"$VASP_MODULES\""
+    echo "export VASP_BINARY=\"$VASP_BINARY\""
+    echo "export VASP_BINARY_CPU=\"$VASP_BINARY_CPU\""
+    echo "export VASP_BINARY_GAM=\"$VASP_BINARY_GAM\""
+    echo "export VASP_BINARY_GAM_CPU=\"$VASP_BINARY_GAM_CPU\""
+    echo "export BINARY_UTILITIES_DIR=\"$BINARY_UTILITIES_DIR\""
+    echo "export SPECTROPY_DIR=\"$SPECTROPY_DIR\""
+    echo "$MARKER_END"
+} >> "$BASHRC"
+echo "[2/4] $bashrc_action env vars in $BASHRC — run 'source ~/.bashrc' or start a new shell"
 
 # ── 3. Sanity checks ─────────────────────────────────────────────────────
 echo "[3/4] checking environment..."
