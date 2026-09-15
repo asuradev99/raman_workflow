@@ -123,10 +123,10 @@ else
     {
         echo "$MARKER_BEGIN"
         echo "# cluster: $CLUSTER — see raman_workflow/$CLUSTER.bashrc"
-        echo "export PATH=\"\$PATH:$REPO_DIR/scripts\""
         echo "export RAMAN_PROJECT_DIR=\"$PROJECT_DIR\""
         echo "export CONDA_INIT=\"$CONDA_INIT\""
         echo "export CONDA_ENV=\"$CONDA_ENV\""
+        echo "export PATH=\"\$CONDA_ENV/bin:$REPO_DIR/scripts:\$PATH\""
         echo "export LIANGBO_SHARED_DIR=\"$LIANGBO_SHARED_DIR\""
         echo "export VASP_MODULES=\"$VASP_MODULES\""
         echo "export VASP_BINARY=\"$VASP_BINARY\""
