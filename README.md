@@ -55,8 +55,17 @@ NERSC uses the existing shared Phonopy environment directly through `PATH`; it d
 
 ```bash
 export CONDA_ENV=/global/common/software/m526/phonopy_env
-export PATH="$CONDA_ENV/bin:$PATH"
+export PATH="$CONDA_ENV/bin:$HOME/.local/bin:$PATH"
 python3 -c 'import phonopy, yaml; print("OK")'
+```
+
+Install SpectroPy from the local checkout into the user site because the shared NERSC environment is read-only:
+
+```bash
+cd ~/SpectroPy
+python3 -m pip install --user -e '.[all]'
+hash -r
+spectropy --help
 ```
 
 The installer configures paths such as `RAMAN_PROJECT_DIR`, `CONDA_ENV`, `VASP_BINARY*`, `VASP_MODULES`, `BINARY_UTILITIES_DIR`, and `SPECTROPY_DIR`. `SCRATCH` must also be available in the shell environment; the Pathfinder profile defines it as `~/scratch`.

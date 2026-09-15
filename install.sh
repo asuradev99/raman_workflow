@@ -132,7 +132,7 @@ fi
     echo "export RAMAN_PROJECT_DIR=\"$PROJECT_DIR\""
     echo "export CONDA_INIT=\"$CONDA_INIT\""
     echo "export CONDA_ENV=\"$CONDA_ENV\""
-    echo "export PATH=\"\$CONDA_ENV/bin:$REPO_DIR/scripts:\$PATH\""
+    echo "export PATH=\"\$CONDA_ENV/bin:\$HOME/.local/bin:$REPO_DIR/scripts:\$PATH\""
     echo "export LIANGBO_SHARED_DIR=\"$LIANGBO_SHARED_DIR\""
     echo "export VASP_MODULES=\"$VASP_MODULES\""
     echo "export VASP_BINARY=\"$VASP_BINARY\""
@@ -175,7 +175,7 @@ if [ -d "$CONDA_ENV" ]; then
             || { echo "      MISSING PyYAML in $CONDA_ENV — pip/conda install pyyaml there"; problems=$((problems + 1)); }
         "$CONDA_ENV/bin/python3" -c "import spectropy_cli" 2>/dev/null \
             && echo "      OK   SpectroPy importable (raman_prep/post_process depend on it)" \
-            || echo "      NOTE SpectroPy not installed in $CONDA_ENV — needed for raman_prep/post_process: cd \$SPECTROPY_DIR && $CONDA_ENV/bin/python3 -m pip install '.[all]'"
+            || echo "      NOTE SpectroPy not installed — needed for raman_prep/post_process: cd \$SPECTROPY_DIR && $CONDA_ENV/bin/python3 -m pip install --user -e '.[all]'"
     fi
 else
     echo "      MISSING conda env: $CONDA_ENV (edit $CLUSTER.bashrc / rerun with --conda-env)"
