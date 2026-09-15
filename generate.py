@@ -7,7 +7,7 @@ Everything config-derived is baked in as literals; the generated bash has no
 dependency on this repo except that it sources common.sh and calls
 check_*.py by absolute path.
 
-    python3 generate.py <material_dir> [--no-scratch] [--cpu] [--debug]
+    python3 generate.py <material_dir> [--no-scratch] [--cpu] [--debug] [--no-monitor]
 
 Runs on $SCRATCH by default (output copied back to the material dir); pass
 --no-scratch to run directly in the material dir.
@@ -423,7 +423,7 @@ echo "[hf_setup] $(ls -d hf_POSCAR-* | wc -l) dirs created"
     return s
 
 
-def emit_dir_loop(b, glob, log, dielectric):
+def emit_dir_loop(b, glob, log, dielectric, monitor=True):
     """force_consts / resonant_vasp — batch run_vasp.sh over displacement dirs."""
     diel = ""
     if dielectric:
@@ -431,6 +431,23 @@ def emit_dir_loop(b, glob, log, dielectric):
     s = _header()
     if b["SBATCH_ARRAY"]:
         array_name = "hf" if glob.startswith("hf_") else "raman"
+        wait_flag = "--wait" if monitor else "--parsable"
+        submission_start = "" if monitor else "submission=$(\n    "
+        submission_end = "" if monitor else (
+            f")\njob_id=${{submission%%;*}}\nprintf '%s\\n' \"$job_id\" > "
+            f".{array_name}_array_job_id\n"
+            'echo "[dispatch] submitted array job $job_id"'
+        )
+        manifest_suffix = "" if monitor else '.$(date +%s).$$'
+        clear_job_file = "" if monitor else f"rm -f .{array_name}_array_job_id\n"
+        task_dielectric = f'python3 {CHECK_DIEL} "$d"\n' if dielectric else ""
+        completion = (f"""
+for d in {glob}; do
+    $CHECK "$d" >/dev/null 2>&1 || {{ echo "[FATAL] $d did not converge" >&2; exit 1; }}
+{diel}done
+rm -f "$manifest"
+echo "[dispatch] all directories converged"
+""" if monitor else "")
         s += f"""
 CHECK="python3 {CHECK_CONV} --static"
 check_all() {{ local d; for d in {glob}; do $CHECK "$d" >/dev/null 2>&1 || return 1; done; }}
@@ -439,7 +456,7 @@ case "${{1:-}}" in
   --check)   check_all && exit 0 || exit 1 ;;
   --restart) for d in {glob}; do rm -f "$d"/{{OUTCAR,CONTCAR,OSZICAR,vasprun.xml,vaspout.h5,{log}}}; done; exit 0 ;;
 esac
-check_all && {{ echo "[dispatch] already complete"; exit 0; }}
+{clear_job_file}check_all && {{ echo "[dispatch] already complete"; exit 0; }}
 
 dirs=()
 for d in {glob}; do
@@ -448,11 +465,11 @@ for d in {glob}; do
 done
 ((${{#dirs[@]}})) || {{ echo "[dispatch] no unfinished directories"; exit 0; }}
 
-manifest="$PWD/.{array_name}_array_dirs"
+manifest="$PWD/.{array_name}_array_dirs{manifest_suffix}"
 printf '%s\\n' "${{dirs[@]}}" > "$manifest"
 last=$((${{#dirs[@]}} - 1))
 echo "[dispatch] submitting ${{#dirs[@]}} one-node jobs, up to {b['ARRAY_MAX_CONCURRENT']} at once"
-sbatch --wait {b['SBATCH_ARRAY']} --array="0-${{last}}%{b['ARRAY_MAX_CONCURRENT']}" -J {array_name}_dirs \
+{submission_start}sbatch {wait_flag} {b['SBATCH_ARRAY']} --array="0-${{last}}%{b['ARRAY_MAX_CONCURRENT']}" -J {array_name}_dirs \
     --export=ALL,SUBMIT_DIR="$PWD",DIR_MANIFEST="$manifest" <<'ARRAY_EOF'
 #!/bin/bash
 set -euo pipefail
@@ -461,13 +478,9 @@ mapfile -t dirs < "$DIR_MANIFEST"
 d="${{dirs[$SLURM_ARRAY_TASK_ID]}}"
 echo "[array $SLURM_ARRAY_JOB_ID/$SLURM_ARRAY_TASK_ID] $d"
 bash "$d/run_vasp.sh"
-ARRAY_EOF
-
-for d in {glob}; do
-    $CHECK "$d" >/dev/null 2>&1 || {{ echo "[FATAL] $d did not converge" >&2; exit 1; }}
-{diel}done
-rm -f "$manifest"
-echo "[dispatch] all directories converged"
+python3 {CHECK_CONV} --static "$d"
+{task_dielectric}ARRAY_EOF
+{submission_end}{completion}
 """
         return s
     s += f"""
@@ -554,11 +567,16 @@ for f in INCAR KPOINTS; do
     [ -s "$f" ] || {{ echo "[raman_prep] FATAL: $f missing — run generate.py" >&2; exit 1; }}
 done
 
-phonopy --symmetry -c CONTCAR > symmetry
-{b['BIN']}/raman_symmetry_mapping
-echo "{b['RAMAN_DISPLACEMENT']}" | {b['BIN']}/{dis_binary}
-{b['BIN']}/raman_poscar
-bash run_raman
+PREP_LOG="raman_prep.log"
+: > "$PREP_LOG"
+phonopy --symmetry -c CONTCAR > symmetry 2>> "$PREP_LOG"
+BIN="${{BINARY_UTILITIES_DIR:?BINARY_UTILITIES_DIR is unset}}"
+{{
+    "$BIN"/raman_symmetry_mapping
+    echo "{b['RAMAN_DISPLACEMENT']}" | "$BIN"/{dis_binary}
+    "$BIN"/raman_poscar
+    bash run_raman
+}} >> "$PREP_LOG" 2>&1
 
 for d in ra_pos_*; do
     cat > "$d/run_vasp.sh" <<VASP_EOF
@@ -596,7 +614,7 @@ def emit_post_process(cfg, b):
             f'|| echo "[post] WARNING: plotting skipped"\n'
         )
     s = _header()
-    s += f"""BIN="{b['BIN']}"
+    s += f"""BIN="${{BINARY_UTILITIES_DIR:?BINARY_UTILITIES_DIR is unset}}"
 DONE="../output/raman_data/Raman_intensity_complex_{first_e}eV"
 
 case "${{1:-}}" in
@@ -639,7 +657,7 @@ done
     return s
 
 
-def emit_run_all(cfg, b, active_steps, work_dir):
+def emit_run_all(cfg, b, active_steps, work_dir, monitor=True):
     """The runner. Driven by whether this compute_mode's YAML block defines any
     sbatch/sbatch_relax/sbatch_post -- not by the mode's name. If it does,
     compute steps are grouped under sbatch --wait phases; if none are set,
@@ -661,6 +679,48 @@ def emit_run_all(cfg, b, active_steps, work_dir):
         if step in ("supercell", "hf_setup", "force_consts", "phonon_post"):
             return f"hf/run_{step}.sh"
         return f"raman/run_{step}.sh"
+
+    if not monitor:
+        unsupported = set(active_steps) - {"raman_prep", "resonant_vasp", "post_process"}
+        if unsupported or not b["SBATCH_ARRAY"]:
+            sys.exit("ERROR: --no-monitor currently requires a Raman-only workflow with sbatch_array")
+        if "raman_prep" in active_steps:
+            lines.extend([
+                f'if ! bash {path("raman_prep")} --check; then',
+                f'    bash {path("raman_prep")}',
+                'fi',
+            ])
+        if "resonant_vasp" in active_steps:
+            lines.extend([
+                'rm -f raman/.raman_array_job_id',
+                f'bash {path("resonant_vasp")}',
+                'dependency=()',
+                'if [ -s raman/.raman_array_job_id ]; then',
+                '    array_job_id=$(<raman/.raman_array_job_id)',
+                '    dependency=("--dependency=afterok:$array_job_id")',
+                'fi',
+            ])
+        else:
+            lines.append('dependency=()')
+        if "post_process" in active_steps:
+            lines.extend([
+                f'if bash {path("post_process")} --check; then',
+                '    echo "[submit] post-processing already complete"',
+                'else',
+                '    submission=$(',
+                f'        sbatch --parsable {b["SBATCH_POST"]} "${{dependency[@]}}" '
+                f'-J post_{name} --mail-type=BEGIN,FAIL,END --mail-user=easuresh@mit.edu <<\'POST_EOF\'',
+                '#!/bin/bash',
+                f'cd "{work_dir}"',
+                f'bash {path("post_process")}',
+                'POST_EOF',
+                '    )',
+                '    post_job_id=${submission%%;*}',
+                '    echo "[submit] submitted post-processing job $post_job_id"',
+                'fi',
+            ])
+        lines.extend(['', 'echo "Workflow submitted; no local monitor is running."'])
+        return "\n".join(lines) + "\n"
 
     if use_sbatch:
         # relax phase
@@ -758,6 +818,8 @@ def main():
                     help="run in the material dir instead of $SCRATCH (scratch is the default)")
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--debug", action="store_true", help="append VASP --dry-run to every VASP call")
+    ap.add_argument("--no-monitor", dest="monitor", action="store_false", default=None,
+                    help="submit Raman and dependent post-processing jobs, then return")
     ap.add_argument("--shared", default=os.path.join(
         os.environ.get("RAMAN_PROJECT_DIR", os.path.dirname(REPO_NEW)),
         "shared_workflow_settings.yaml"))
@@ -777,6 +839,7 @@ def main():
     cfg = load_config([args.shared, per_material])
     active_steps = step_order_from_file or STEP_ORDER
     validate_config(cfg, active_steps)
+    monitor = cfg.get("monitor", True) if args.monitor is None else args.monitor
 
     name = os.path.basename(material_dir)
     # Base work dir: $SCRATCH by default, material dir with --no-scratch.
@@ -815,7 +878,8 @@ def main():
 
     print(f"\nGenerating pipeline for {name}")
     print(f"  work_dir: {work_dir}")
-    print(f"  mode: {b['COMPUTE_MODE']}  steps: {active_steps}\n")
+    print(f"  mode: {b['COMPUTE_MODE']}  steps: {active_steps}")
+    print(f"  monitoring: {'enabled' if monitor else 'disabled'}\n")
 
     for sub in ("scf", "hf", "raman"):
         os.makedirs(os.path.join(work_dir, sub), exist_ok=True)
@@ -871,7 +935,8 @@ def main():
               emit_hf_setup(cfg, b, args.debug))
     if "force_consts" in active_steps:
         write(os.path.join(work_dir, "hf", "run_force_consts.sh"),
-              emit_dir_loop(b, "hf_POSCAR-*", "relaxation.stdout", dielectric=False))
+              emit_dir_loop(b, "hf_POSCAR-*", "relaxation.stdout", dielectric=False,
+                            monitor=monitor))
     if "phonon_post" in active_steps:
         write(os.path.join(work_dir, "hf", "run_phonon_post.sh"),
               emit_phonon_post(cfg, b))
@@ -880,13 +945,14 @@ def main():
               emit_raman_prep(cfg, b, args.debug))
     if "resonant_vasp" in active_steps:
         write(os.path.join(work_dir, "raman", "run_resonant_vasp.sh"),
-              emit_dir_loop(b, "ra_pos_*", "stdout", dielectric=True))
+              emit_dir_loop(b, "ra_pos_*", "stdout", dielectric=True,
+                            monitor=monitor))
     if "post_process" in active_steps:
         write(os.path.join(work_dir, "raman", "run_post_process.sh"),
               emit_post_process(cfg, b))
 
     write(os.path.join(work_dir, "run_all.sh"),
-          emit_run_all(cfg, b, active_steps, work_dir))
+          emit_run_all(cfg, b, active_steps, work_dir, monitor=monitor))
 
     print(f"\nDone. Run:  bash {os.path.join(work_dir, 'run_all.sh')}")
 

@@ -97,6 +97,7 @@ Available options are:
 - `--no-scratch`: generate directly in the material project directory.
 - `--cpu`: select the CPU VASP binary for this generation.
 - `--debug`: generate beneath a separate `debug/` directory and add VASP's `--dry-run` flag.
+- `--no-monitor`: submit a Raman array and dependent post-processing job, then return immediately.
 - `--shared PATH`: use a different shared settings file.
 
 ## Selecting workflow stages
@@ -213,6 +214,14 @@ compute_modes:
 ```
 
 With `sbatch_array` present, `force_consts` and `resonant_vasp` submit Slurm arrays. Every array task runs one displacement directory on one node. `%15` limits the array to 15 simultaneous calculations. Completed directories are skipped when the stage is rerun.
+
+For a Raman-only workflow that should return control after submission, generate with `--no-monitor` or set:
+
+```yaml
+monitor: false
+```
+
+Detached mode submits the unfinished Raman calculations without `--wait` or automatic retries. It then submits post-processing with an `afterok` dependency on the array. Each array task performs the convergence and dielectric checks itself, so failed or timed-out tasks prevent post-processing from starting. After correcting the problem, rerun `run_all.sh`; completed directories are skipped and a new array is submitted for the remainder.
 
 `--mem=0` is a Pathfinder-specific scheduling choice from Liangbo's instructions. It requests all memory on the allocated node and avoids the oversized request produced by `128 × --mem-per-cpu=4G`.
 

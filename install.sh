@@ -26,7 +26,8 @@
 #  Usage:
 #    ./install.sh <nersc|pathfinder> [--project-dir DIR] [--conda-env PATH]
 #                  [--conda-init PATH] [--vasp-binary PATH]
-#                  [--vasp-modules "mod1 mod2 ..."] [--binary-utils DIR]
+#                  [--vasp-modules "mod1 mod2 ..."] [--liangbo-shared DIR]
+#                  [--binary-utils DIR]
 #
 #  The cluster argument selects <cluster>.bashrc (repo root) for defaults; any
 #  flag passed overrides just that one value, for a one-off install without
@@ -64,6 +65,7 @@ while [[ $# -gt 0 ]]; do
         --conda-init)    CONDA_INIT="$2"; shift 2 ;;
         --vasp-binary)   VASP_BINARY="$2"; shift 2 ;;
         --vasp-modules)  VASP_MODULES="$2"; shift 2 ;;
+        --liangbo-shared) LIANGBO_SHARED_DIR="$2"; shift 2 ;;
         --binary-utils)  BINARY_UTILITIES_DIR="$2"; shift 2 ;;
         -h|--help)
             sed -n '2,35p' "${BASH_SOURCE[0]}"; exit 0 ;;
@@ -125,6 +127,7 @@ else
         echo "export RAMAN_PROJECT_DIR=\"$PROJECT_DIR\""
         echo "export CONDA_INIT=\"$CONDA_INIT\""
         echo "export CONDA_ENV=\"$CONDA_ENV\""
+        echo "export LIANGBO_SHARED_DIR=\"$LIANGBO_SHARED_DIR\""
         echo "export VASP_MODULES=\"$VASP_MODULES\""
         echo "export VASP_BINARY=\"$VASP_BINARY\""
         echo "export VASP_BINARY_CPU=\"$VASP_BINARY_CPU\""
@@ -140,6 +143,13 @@ fi
 # ── 3. Sanity checks ─────────────────────────────────────────────────────
 echo "[3/4] checking environment..."
 problems=0
+
+if [ -d "$LIANGBO_SHARED_DIR" ]; then
+    echo "      OK   liangbo_shared_dir found: $LIANGBO_SHARED_DIR"
+else
+    echo "      MISSING liangbo_shared_dir: $LIANGBO_SHARED_DIR (edit $CLUSTER.bashrc / rerun with --liangbo-shared)"
+    problems=$((problems + 1))
+fi
 
 if [ -f "$CONDA_INIT" ]; then
     echo "      OK   conda_init found: $CONDA_INIT"

@@ -30,9 +30,11 @@
 # script was silently crashing at this exact line (the crash's exit code
 # coincidentally matched a real --check failure, which is how it went
 # unnoticed until traced directly).
-set +u
-source ~/.bashrc
-set -u
+if [ -z "${CONDA_INIT:-}" ] || [ -z "${CONDA_ENV:-}" ] || [ -z "${VASP_MODULES:-}" ]; then
+    set +u
+    source ~/.bashrc
+    set -u
+fi
 source "$CONDA_INIT"
 # CONDA_ENV may be a real conda environment (has conda-meta/, e.g. NERSC's
 # phonopy_env) or a plain `python3 -m venv` virtualenv (has bin/activate, no
@@ -45,7 +47,10 @@ if [ -d "$CONDA_ENV/conda-meta" ]; then
 else
     source "$CONDA_ENV/bin/activate"
 fi
-module load $VASP_MODULES
+for workflow_module in $VASP_MODULES; do
+    module is-loaded "$workflow_module" || module load "$workflow_module"
+done
+unset workflow_module
 
 # ── run_until_complete <step-script> ────────────────────────────────────────
 # Run a step once unless it's already done (`step.sh --check` exit 0). No

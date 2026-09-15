@@ -14,6 +14,7 @@
 # Miniforge3 is a centrally-installed Lmod module (not a project path); its
 # conda.sh is real and importable as-is.
 export CONDA_INIT="/software/baseline/nsp/miniforge3/24.11.3-0/etc/profile.d/conda.sh"
+export LIANGBO_SHARED_DIR="/projects/hpcl-mat269/proj-shared/liangbo"
 
 # Built at ~/phonopy_env (a plain venv, not a conda env despite the var name --
 # conda-meta/ absence is how common.sh/generate.py's CONDA_ENV activation
@@ -44,8 +45,8 @@ export VASP_MODULES="gcc/12.4.0 openmpi/5.0.5 fftw/3.3.10-omp openblas/0.3.28-om
 # purpose -- there's no GPU build to point them at yet, so generate.py fails
 # loudly if you forget --cpu, instead of silently running the CPU binary
 # under a GPU-shaped config. Use `generate.py --cpu` until a GPU build exists.
-export VASP_BINARY_CPU="/projects/hpcl-mat269/proj-shared/liangbo/vasp_bin/vasp_std"
-export VASP_BINARY_GAM_CPU="/projects/hpcl-mat269/proj-shared/liangbo/vasp_bin/vasp_gam"
+export VASP_BINARY_CPU="$LIANGBO_SHARED_DIR/vasp_bin/vasp_std"
+export VASP_BINARY_GAM_CPU="$LIANGBO_SHARED_DIR/vasp_bin/vasp_gam"
 export VASP_BINARY=""
 export VASP_BINARY_GAM=""
 
@@ -54,7 +55,7 @@ export VASP_BINARY_GAM=""
 # generate.py's raman_prep/post_process steps call. NOT present here:
 # runHF, used by hf_setup (untouched by Liangbo's raman-step rewrite) -- that
 # one is still unaccounted for and will need locating or building separately.
-export BINARY_UTILITIES_DIR="/projects/hpcl-mat269/proj-shared/liangbo/raman_utility"
+export BINARY_UTILITIES_DIR="$LIANGBO_SHARED_DIR/raman_utility"
 
 # Confirmed present at ~/SpectroPy (real checkout, not a placeholder).
 export SPECTROPY_DIR="$HOME/SpectroPy"
