@@ -151,7 +151,9 @@ else
     problems=$((problems + 1))
 fi
 
-if [ -f "$CONDA_INIT" ]; then
+if [ -z "$CONDA_INIT" ]; then
+    echo "      OK   conda_init not required for a virtual environment"
+elif [ -f "$CONDA_INIT" ]; then
     echo "      OK   conda_init found: $CONDA_INIT"
 else
     echo "      MISSING conda_init: $CONDA_INIT (edit $CLUSTER.bashrc / rerun with --conda-init)"

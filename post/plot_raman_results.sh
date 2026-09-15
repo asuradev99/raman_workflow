@@ -17,8 +17,7 @@
 #   4. Generates phonon band structure PDF via phonopy-bandplot
 #   5. Generates 2D eigenvector (mode arrow) plots for each phonon mode
 #
-# Dependencies: conda environment with phonopy, matplotlib, numpy, pyyaml
-#                (/global/common/software/m526/phonopy_env)
+# Dependencies: configured Python environment with phonopy, matplotlib, numpy, pyyaml
 # ──────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -122,10 +121,6 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Running SpectroPy plotter..."
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-# ── Activate conda, load LaTeX, and run plotter ──────────────────────────────
-source /global/common/software/m3035/conda/etc/profile.d/conda.sh
-conda activate /global/common/software/m526/phonopy_env
 
 # Load texlive module for matplotlib LaTeX rendering (usetex=True)
 module load texlive/2024

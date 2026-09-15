@@ -8,8 +8,8 @@
 #  nersc' run, or edit the ~/.bashrc block directly to fix one already
 #  installed.
 # =============================================================================
-export CONDA_INIT="/global/common/software/m3035/conda/etc/profile.d/conda.sh"
-export CONDA_ENV="/global/common/software/m526/phonopy_env"
+export CONDA_INIT=""
+export CONDA_ENV="$HOME/phonopy_env"
 export LIANGBO_SHARED_DIR="/global/cfs/cdirs/m526/liangbo"
 export VASP_MODULES="PrgEnv-nvidia gpu cray-hdf5 cray-fftw nccl/2.18.3-cu12 vasp/6.4.3-gpu"
 export VASP_BINARY="$LIANGBO_SHARED_DIR/bin/gpu/vasp_std"
@@ -21,7 +21,7 @@ export BINARY_UTILITIES_DIR="/global/cfs/cdirs/m526/vasp_binaries/binary_utility
 # value just skips that step (see build_bake's VIZ_ENABLED check). This is a
 # user home path, not a shared cluster path: point it at your own SpectroPy
 # checkout if you use --debug.
-export SPECTROPY_DIR="/global/homes/e/easuresh/SpectroPy"
+export SPECTROPY_DIR="$HOME/SpectroPy"
 # Where share_material.sh copies a finished material to for Liangbo. NOT yet
 # forwarded by install.sh's ~/.bashrc writer -- export it by hand, or add it
 # to that writer, before relying on it.
